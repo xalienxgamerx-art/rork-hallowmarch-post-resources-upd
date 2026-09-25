@@ -1,27 +1,43 @@
 package com.rork.hollowmarch.game
 
-import com.rork.hollowmarch.game.Textures.valueNoise
+import com.rork.hollowmarch.world.Biome
 import com.rork.hollowmarch.world.Site
 import com.rork.hollowmarch.world.World
 import com.rork.hollowmarch.world.isSettlement
 import kotlin.math.abs
+import kotlin.math.sqrt
 import kotlin.random.Random
 
 /**
- * The economy layer beneath the deep history: what the land could yield, what
- * each settlement sows and reaps, what it eats, which materials it can put its
- * hands on and from where, and who trades with whom. Aggregate throughout —
- * no individual farms, pits, or wagons — and the seed's own: same seed, same
- * years, same ledger, same harvests forever.
+ * The economy layer beneath the deep history. It is a consumer of the world,
+ * not a second world-maker: the land each settlement stands on is read from
+ * the province's own terrain map — the same heights, wetness, rivers and
+ * biomes worldgen drew — never re-invented from private noise.
  *
- * Terrain reads ([Ecology]) are pure and derived; the mutable residue —
- * timber stocks, crop adoption, deposits, food reserves, trade roads, the
- * last economic identity — rides the history save's fourth section.
+ * Four layers are kept distinct throughout:
+ *
+ *   potential   what the authoritative land could give
+ *   production  what hands actually took this year
+ *   stock       what the place holds in yard, granary and forge
+ *   trade       what actually moves along a road between two places
+ *
+ * A high potential with no folk produces nothing; a discovered deposit no one
+ * works yields no metal; a depleted seam cannot keep a quarry alive. Aggregate
+ * throughout — no individual farms, pits, wagons or merchants — and the seed's
+ * own: same seed, same world, same years, same ledgers forever.
+ *
+ * The mutable residue — stocks, crops, seams, deposits, roads, the last
+ * economic identity — rides the history save's fourth section. Everything
+ * derived from the world is recomputed, never saved.
  */
 
 // ------------------------------------------------------------------ terrain
 
-/** One settlement's stretch of land, read off the province's noise fields. */
+/**
+ * One settlement's stretch of land, read off the province's own terrain: the
+ * elevation, wetness and biome worldgen stored, with river distance, local
+ * relief and the derived earth measured against that same ground.
+ */
 data class LandProfile(
     val elevation: Float,
     val roughness: Float,
@@ -30,7 +46,8 @@ data class LandProfile(
     val water: Float,
     val soil: Float,
     val warmth: Float,
-    val saltBand: Float
+    val saltBand: Float,
+    val biome: Biome = Biome.DOWNS
 )
 
 /** What the land around a place is like, in the words the chronicle uses. */
@@ -57,7 +74,7 @@ enum class ResourceKind(val label: String, val renewable: Boolean) {
     ORE("ore", false)
 }
 
-/** A 0..1 answer per resource, straight from the land — never a lookup table. */
+/** A 0..1 answer per resource, read from the authoritative land. */
 data class ResourcePotential(
     val grain: Float,
     val grazing: Float,
@@ -84,51 +101,97 @@ data class ResourcePotential(
 }
 
 /**
- * The province's ecology: every settlement's land, read from the same noise
- * fields the world itself was drawn with. Pure — the same world always reads
- * the same land.
+ * The province's ecology: every settlement's land, read from the terrain map
+ * the world itself was made with. Pure — the same world always reads the same
+ * land, and no economic terrain exists apart from the world's.
  */
 object Ecology {
-    private const val SCALE = 240f
+
+    /** How near a river must run to water a place's fields, in province steps. */
+    private const val RIVER_REACH = 0.02f
+
+    /** How far from the shore sea-salt still rides the wind, in province steps. */
+    private const val SHORE_REACH = 0.03f
 
     /** The land one settlement stands on. */
     fun profileOf(world: World, site: Site): LandProfile {
-        val x = site.x * SCALE
-        val y = site.y * SCALE
-        val s = world.seed.toInt()
-        val elevation = 0.55f * valueNoise(x * 0.020f, y * 0.020f, s) +
-            0.30f * valueNoise(x * 0.055f, y * 0.055f, s + 101) +
-            0.15f * valueNoise(x * 0.130f, y * 0.130f, s + 202)
-        val roughness = (0.6f * valueNoise(x * 0.075f, y * 0.075f, s + 303) +
-            0.4f * valueNoise(x * 0.180f, y * 0.180f, s + 404))
-        val moisture = (0.65f * valueNoise(x * 0.045f, y * 0.045f, s + 505) +
-            0.35f * valueNoise(x * 0.110f, y * 0.110f, s + 606))
-        val forest = (0.55f * moisture + 0.65f * valueNoise(x * 0.060f, y * 0.060f, s + 707) - 0.10f)
-            .coerceIn(0f, 1f)
-        val riverField = valueNoise(x * 0.030f, y * 0.030f, s + 808)
-        val river = (1f - abs(riverField - 0.52f) / 0.06f).coerceIn(0f, 1f)
-        val lake = valueNoise(x * 0.090f, y * 0.090f, s + 909)
-        val wet = ((0.42f - elevation) / 0.42f).coerceIn(0f, 1f) * moisture
-        val water = maxOf(river, lake * 0.7f, wet * 0.9f).coerceIn(0f, 1f)
-        val soil = ((0.95f - elevation * 0.75f) * (0.45f + moisture * 0.55f) * (0.75f + river * 0.45f))
-            .coerceIn(0f, 1f)
+        val terrain = world.terrain
+        val elevation = terrain.heightAt(site.x, site.y)
+        val moisture = terrain.moistureAt(site.x, site.y)
+        val biome = terrain.biomeAt(site.x, site.y)
+        // local relief: how fast the authoritative ground rises around the place
+        val step = 1.5f / terrain.size
+        val around = listOf(
+            terrain.heightAt(site.x + step, site.y),
+            terrain.heightAt(site.x - step, site.y),
+            terrain.heightAt(site.x, site.y + step),
+            terrain.heightAt(site.x, site.y - step)
+        )
+        val roughness = (around.sumOf { abs(it - elevation).toDouble() } / around.size / 0.07f)
+            .toFloat().coerceIn(0f, 1f)
+        // the province's own waters
+        val river = terrain.rivers.maxOfOrNull { r ->
+            val nearest = r.points.minOf { p ->
+                val dx = p.x - site.x
+                val dy = p.y - site.y
+                sqrt(dx * dx + dy * dy)
+            }
+            (RIVER_REACH - nearest) / RIVER_REACH
+        } ?: 0f
+        // shore and marsh: the map's own salt and standing water
+        var shore = 0
+        for (i in 0 until 8) {
+            val ang = i * 0.7853982f
+            val b = terrain.biomeAt(
+                site.x + cosOf(ang) * SHORE_REACH,
+                site.y + sinOf(ang) * SHORE_REACH
+            )
+            if (b == Biome.OCEAN || b == Biome.MARSH) shore++
+        }
+        val shoreShare = shore / 8f
+        val water = maxOf(
+            river,
+            if (biome == Biome.MARSH) 0.85f else 0f,
+            if (biome == Biome.OCEAN) 1f else 0f,
+            if (biome == Biome.FOREST) moisture * 0.30f else moisture * 0.20f
+        ).coerceIn(0f, 1f)
+        // woodland density follows the authoritative classification and wetness;
+        // only the map's own forests stand dense
+        val forest = when (biome) {
+            Biome.FOREST -> 0.55f + 0.45f * moisture
+            Biome.MARSH -> 0.22f + 0.20f * moisture
+            Biome.HILLS -> 0.20f + 0.25f * moisture
+            Biome.MOOR -> 0.15f + 0.15f * moisture
+            Biome.DOWNS -> 0.08f + 0.10f * moisture
+            Biome.PEAK -> 0.05f
+            Biome.OCEAN -> 0f
+        }.coerceIn(0f, 1f)
+        // the earth: a derivation, but from the authoritative ground alone
+        val soil = if (biome == Biome.OCEAN) {
+            0f
+        } else {
+            ((1f - elevation * 0.7f) * (0.45f + moisture * 0.55f) * (0.72f + river.coerceIn(0f, 1f) * 0.4f))
+                .coerceIn(0f, 1f)
+        }
         val warmth = (0.22f + 0.55f * site.y + 0.10f * (1f - elevation)).coerceIn(0f, 1f)
-        val saltBand = (1f - abs(valueNoise(x * 0.050f, y * 0.050f, s + 1010) - 0.50f) / 0.035f)
+        val saltBand = maxOf(if (biome == Biome.MARSH) 0.75f else 0f, shoreShare * shoreShare)
             .coerceIn(0f, 1f)
-        return LandProfile(elevation, roughness, moisture, forest, water, soil, warmth, saltBand)
+        return LandProfile(elevation, roughness, moisture, forest, water, soil, warmth, saltBand, biome)
     }
 
     /** What the land is like, in plain words. */
     fun characterOf(p: LandProfile): LandCharacter = when {
+        p.biome == Biome.OCEAN || p.biome == Biome.MARSH -> LandCharacter.WETLAND
         p.elevation > 0.68f && p.roughness > 0.55f -> LandCharacter.MOUNTAIN
-        p.elevation > 0.55f || p.roughness > 0.45f -> LandCharacter.HILLS
+        p.biome == Biome.PEAK -> LandCharacter.MOUNTAIN
+        p.elevation > 0.55f || p.roughness > 0.45f || p.biome == Biome.HILLS -> LandCharacter.HILLS
         p.water > 0.55f && p.elevation < 0.40f -> LandCharacter.WETLAND
-        p.forest > 0.62f -> LandCharacter.FOREST
+        p.forest > 0.62f || p.biome == Biome.FOREST -> LandCharacter.FOREST
         p.water > 0.30f && p.soil > 0.50f -> LandCharacter.VALLEY
         else -> LandCharacter.PLAIN
     }
 
-    /** What the land could yield, if hands worked it. */
+    /** What the land could yield, if hands worked it. Potential, never production. */
     fun potentialOf(p: LandProfile): ResourcePotential {
         val grain = (p.soil * (1f - p.roughness * 0.55f) * band(p.warmth, 0.30f, 0.85f))
             .coerceIn(0f, 1f)
@@ -150,6 +213,9 @@ object Ecology {
         v < lo -> (1f - (lo - v) / 0.15f).coerceIn(0f, 1f)
         else -> (1f - (v - hi) / 0.15f).coerceIn(0f, 1f)
     }
+
+    private fun cosOf(a: Float): Float = kotlin.math.cos(a)
+    private fun sinOf(a: Float): Float = kotlin.math.sin(a)
 }
 
 // -------------------------------------------------------------------- crops
@@ -194,19 +260,43 @@ enum class CropKind(
 /** Where a crop stands in a place's fields. */
 enum class CropStage { UNKNOWN, CULTIVATED, ESTABLISHED }
 
+/**
+ * The broad stores a kitchen draws from. Crops keep their own names until the
+ * threshing floor; here they become the food the folk actually eat.
+ */
+enum class FoodKind(val label: String) {
+    GRAIN("grain"),
+    MEAT("meat"),
+    FISH("fish"),
+    GATHERED("gleanings"),
+    PRODUCE("garden produce")
+}
+
 // ------------------------------------------------------------------ deposits
 
-/** A pocket of metal in the ground: how much it held, and how much is left. */
+/** A pocket of metal in the ground: how much it held, how much is left, and whether anyone ever worked it. */
 data class DepositState(
     val material: Material,
     val richness: Int,
     val remaining: Int,
-    val discovered: Boolean
+    val discovered: Boolean,
+    val worked: Boolean = false
 )
 
-/** A trade road between two places, carrying one resource. */
-data class TradeRoute(val fromId: Int, val toId: Int, val resource: ResourceKind) {
-    val key: String get() = "${minOf(fromId, toId)}>${maxOf(fromId, toId)}:${resource.name}"
+/** A trade road between two places, carrying one cargo — food, bulk goods, or a material. */
+data class TradeRoute(
+    val fromId: Int,
+    val toId: Int,
+    val cargo: String,
+    val since: Int = 0,
+    val strength: Int = 0,
+    val lastQty: Int = 0
+) {
+    val key: String get() = "${minOf(fromId, toId)}>${maxOf(fromId, toId)}:$cargo"
+    /** The cargo as a bulk resource, when it is one. */
+    val resource: ResourceKind? get() = ResourceKind.entries.firstOrNull { it.name == cargo }
+    /** The cargo as a worked material, when it is one. */
+    val material: Material? get() = Material.entries.firstOrNull { it.name == cargo }
 }
 
 /** Where a settlement's material comes from, in one word. */
@@ -225,41 +315,81 @@ data class MaterialProvenance(
 /**
  * The living economy of every settlement, turned year by year beneath the
  * folk ledger. Pure in its rolls: every chance is drawn from the seed, the
- * place, and the year — never from luck.
+ * place, and the year — never from luck. Potential is read from the world;
+ * everything after that, the folk must actually do.
  */
 class EconomySimulation private constructor(private val world: World) {
 
     private val geography = MaterialGeography(world)
 
-    // derived terrain, never saved
+    // derived from the authoritative terrain, never saved
     private val profiles = mutableMapOf<Int, LandProfile>()
     private val potentials = mutableMapOf<Int, ResourcePotential>()
 
     // mutable residue, saved
     private val states = mutableMapOf<Int, EcoState>()
 
-    /** One place's economic residue: fields, woods, diggings, granary, roads. */
+    /** One place's economic residue: fields, woods, yards, granary, roads. */
     private class EcoState(val siteId: Int) {
+        // forestry: the standing woods, and the memory of what they were
         var timber: Int = 0
         var timberInit: Int = 0
         var timberGone: Boolean = false
+        var timberCut: Int = 0
+        // the waters and the game feel the hand that works them
         var fishPressure: Int = 0 // thousandths
         var gamePressure: Int = 0 // thousandths
-        var reserve: Int = 0
+        // seams and beds in the ground: what is left to take
+        var stoneSeam: Int = 0
+        var saltSeam: Int = 0
+        var clayBed: Int = 0
+        var clayInit: Int = 0
+        // stocks: the yard, the granary, the seed barn, the forge store
+        val stock = LinkedHashMap<ResourceKind, Int>() // TIMBER, CLAY, STONE, SALT on hand
+        val cropStock = LinkedHashMap<CropKind, Int>() // harvested, awaiting the threshing floor
+        val food = LinkedHashMap<FoodKind, Int>() // the broad stores
+        val oreStock = LinkedHashMap<Material, Int>() // dug ore, awaiting the forge
+        val materialStock = LinkedHashMap<Material, Int>() // worked materials on hand
+        // last year's actual production — what hands really took
+        val production = LinkedHashMap<ResourceKind, Int>()
+        val foodProduction = LinkedHashMap<FoodKind, Int>()
+        val materialProduced = LinkedHashMap<Material, Int>()
+        var oreExtracted: Int = 0
+        // industry memory
+        val industries = mutableSetOf<Material>()
+        val declined = mutableSetOf<Material>()
+        // crops: crop -> years cultivated
+        val crops = LinkedHashMap<CropKind, Int>()
+        // diggings
+        val deposits = mutableListOf<MutableDeposit>()
+        // roads: key -> the road's own memory
+        val routes = LinkedHashMap<String, RouteState>()
+        // identity and hard years
+        var labels: List<String>? = null
         var richYear: Boolean = false
         var famineStreak: Int = 0
-        val crops = LinkedHashMap<CropKind, Int>() // crop -> years cultivated
-        val deposits = mutableListOf<MutableDeposit>()
-        val routes = LinkedHashSet<String>()
-        var labels: List<String>? = null
+        var quarryOpened: Boolean = false
+        var quarryClosed: Boolean = false
+        var saltOpened: Boolean = false
+        var saltClosed: Boolean = false
     }
+
+    /** A trade road's own memory: when beaten, how long it has run, what it last carried. */
+    private class RouteState(
+        val cargo: String,
+        var since: Int,
+        var strength: Int = 0,
+        var lastQty: Int = 0,
+        var dry: Int = 0
+    )
 
     /** The working form of a deposit while the economy runs. */
     private class MutableDeposit(
         val material: Material,
         val richness: Int,
         var remaining: Int,
-        var discovered: Boolean
+        var discovered: Boolean,
+        var announced: Boolean = false
     )
 
     // ------------------------------------------------------------- land reads
@@ -285,6 +415,10 @@ class EconomySimulation private constructor(private val world: World) {
         val pot = potentialOf(site)
         st.timber = (pot.timber * 1200f).toInt().coerceAtLeast(0)
         st.timberInit = st.timber
+        st.clayBed = (pot.clay * 600f).toInt().coerceAtLeast(0)
+        st.clayInit = st.clayBed
+        st.stoneSeam = (pot.stone * 500f).toInt().coerceAtLeast(0)
+        st.saltSeam = if (pot.salt > SALT_SEAM_FLOOR) (pot.salt * 300f).toInt() else 0
         val rng = Random(world.seed * 7919L + site.id * 104729L + 17L)
         val available = geography.available(cultureOf(site)).toSet()
         val common = listOf(
@@ -312,11 +446,32 @@ class EconomySimulation private constructor(private val world: World) {
         return st
     }
 
-    /** The standing wood about a place, in logs. */
+    /** The standing wood about a place, in logs — the forest, not the yard. */
     fun timberOf(site: Site): Int = stateOf(site).timber
 
-    /** What stands in a place's granary. */
-    fun reserveOf(site: Site): Int = stateOf(site).reserve
+    /** The cut logs in a place's yard — stock, not standing wood. */
+    fun logsOf(site: Site): Int = stockOf(site, ResourceKind.TIMBER)
+
+    /** What the yard holds of a bulk good. */
+    fun stockOf(site: Site, kind: ResourceKind): Int = stateOf(site).stock[kind] ?: 0
+
+    /** What stands in a place's granary: all the broad stores together. */
+    fun reserveOf(site: Site): Int = stateOf(site).food.values.sum()
+
+    /** A place's broad food stores, by kind. */
+    fun foodOf(site: Site): Map<FoodKind, Int> = stateOf(site).food.toMap()
+
+    /** What waits in the seed barn. */
+    fun cropStockOf(site: Site): Map<CropKind, Int> = stateOf(site).cropStock.toMap()
+
+    /** Ore dug and waiting for the forge. */
+    fun oreStockOf(site: Site): Map<Material, Int> = stateOf(site).oreStock.toMap()
+
+    /** Worked materials on hand. */
+    fun materialStockOf(site: Site): Map<Material, Int> = stateOf(site).materialStock.toMap()
+
+    /** What hands actually took last year, per resource — not what the land could give. */
+    fun productionOf(site: Site): Map<ResourceKind, Int> = stateOf(site).production.toMap()
 
     /** How a crop stands in a place's fields. */
     fun cropStageOf(site: Site, crop: CropKind): CropStage {
@@ -331,11 +486,13 @@ class EconomySimulation private constructor(private val world: World) {
 
     /** A place's diggings, frozen for reading. */
     fun depositsOf(site: Site): List<DepositState> =
-        stateOf(site).deposits.map { DepositState(it.material, it.richness, it.remaining, it.discovered) }
+        stateOf(site).deposits.map { DepositState(it.material, it.richness, it.remaining, it.discovered, it.announced) }
 
-    /** The roads a place keeps, parsed for reading. */
+    /** The roads a place keeps, parsed for reading, in a settled order. */
     fun routesOf(site: Site): List<TradeRoute> =
-        stateOf(site).routes.mapNotNull { key -> parseRoute(key) }
+        stateOf(site).routes.entries.mapNotNull { (key, r) ->
+            parseRoute(key)?.let { TradeRoute(it.fromId, it.toId, r.cargo, r.since, r.strength, r.lastQty) }
+        }.sortedBy { it.key }
 
     /** A place's economic identity, derived from what it actually produces. */
     fun specializationOf(site: Site, folk: Int): List<String> {
@@ -365,50 +522,226 @@ class EconomySimulation private constructor(private val world: World) {
             val st = stateOf(site)
             val folk = (folkOverride[site.id] ?: ledger.folkOf(site)).coerceAtLeast(0)
             val pot = potentialOf(site)
-            stepCrops(year, site, st)
-            val yields = yieldsOf(site, folk, st, pot)
+            stepCrops(year, site, folk, st, into)
+            produce(year, site, folk, st, pot, into)
             stepPressure(folk, st, pot)
-            stepTimber(year, site, folk, st, pot, into)
-            stepDeposits(year, site, folk, st, into)
-            stepFood(year, site, folk, st, pot, yields, living, into, hunger)
+            processMaterials(year, site, folk, st, into)
             stepTrade(year, site, st, living, ledger, into)
+            stepFood(year, site, folk, st, into, hunger)
             stepSpecialization(year, site, folk, st, into)
         }
         return hunger
     }
 
-    /** Crops arrive by seed and trade, and yearly the fields grow surer. */
-    private fun stepCrops(year: Int, site: Site, st: EcoState) {
+    /** Crops arrive by seed and trade; abandoned fields go back to brush. */
+    private fun stepCrops(year: Int, site: Site, folk: Int, st: EcoState, into: MutableList<AgeEvent>) {
+        if (folk < MIN_FIELD_FOLK && st.crops.isNotEmpty()) {
+            st.crops.clear()
+            st.cropStock.clear()
+            into += AgeEvent(
+                year, AgeEventKind.CROP_LOST, site.id,
+                text = "The fields of ${site.name} went back to brush — too few hands remain to work them."
+            )
+        }
         val prof = profileOf(site)
         for (crop in CropKind.entries) {
             val suit = crop.suitability(prof)
             val years = st.crops[crop]
             if (years == null) {
                 if (suit < ADOPT_FLOOR) continue
-                val chance = suit * 0.28f + if (st.routes.isNotEmpty()) 0.05f else 0f
+                val chance = suit * ADOPT_CHANCE + if (st.routes.isNotEmpty()) 0.05f else 0f
                 if (rng(site.id, year, 31 + crop.ordinal).nextFloat() < chance) {
                     st.crops[crop] = 0
                 }
             } else {
                 st.crops[crop] = years + 1
+                if (years + 1 == ESTABLISH_YEARS) {
+                    into += AgeEvent(
+                        year, AgeEventKind.CROP_ESTABLISHED, site.id,
+                        text = "The ${crop.label} fields of ${site.name} have taken root; the place will be known for them."
+                    )
+                }
             }
         }
     }
 
-    /** What a place produces in a year, in food, from its fields and waters.
-     * The land has only so many hands' worth of ground: past its breadth the
-     * yield per soul thins, and the place must trade or walk. */
-    private fun yieldsOf(site: Site, folk: Int, st: EcoState, pot: ResourcePotential): FloatArray {
+    /**
+     * The year's work: what hands actually take from the land. Potential sets
+     * the ceiling, folk and capability set the take, and the take becomes
+     * stock — never a number that vanishes into the year.
+     */
+    private fun produce(year: Int, site: Site, folk: Int, st: EcoState, pot: ResourcePotential, into: MutableList<AgeEvent>) {
         val hands = folk.coerceAtMost(LAND_FOLK)
-        val cropFood = st.crops.entries.sumOf { (crop, years) ->
-            val stage = if (years >= ESTABLISH_YEARS) 1f else 0.55f
-            (pot.grain * crop.suitability(profileOf(site)) * stage * hands * CROP_RATE).toDouble()
-        }.toFloat()
-        val meat = pot.grazing * hands * MEAT_RATE
-        val game = pot.game * (1f - st.gamePressure / 1000f) * hands * GAME_RATE
-        val fish = pot.fish * (1f - st.fishPressure / 1000f) * hands * FISH_RATE
-        val gathered = pot.gathered * hands * GATHER_RATE
-        return floatArrayOf(cropFood, meat, game, fish, gathered)
+        st.production.clear()
+        st.foodProduction.clear()
+        st.materialProduced.clear()
+        st.timberCut = 0
+        st.oreExtracted = 0
+
+        // the harvest: each adopted crop yields by its own suitability, the land shared among them
+        val grown = st.crops.size
+        if (grown > 0 && hands > 0) {
+            val prof = profileOf(site)
+            for ((crop, years) in st.crops) {
+                val stage = if (years >= ESTABLISH_YEARS) 1f else 0.55f
+                val yield = (crop.suitability(prof) * stage * hands * CROP_RATE / grown).toInt()
+                if (yield > 0) st.cropStock[crop] = (st.cropStock[crop] ?: 0) + yield
+            }
+        }
+        // the threshing floor: harvest becomes stores, a tenth kept back for seed
+        for ((crop, qty) in st.cropStock.entries.toList()) {
+            val threshed = qty - qty / SEED_SHARE
+            if (threshed > 0) {
+                val kind = if (crop == CropKind.GRAIN || crop == CropKind.BARLEY) FoodKind.GRAIN else FoodKind.PRODUCE
+                st.food[kind] = (st.food[kind] ?: 0) + threshed
+                st.foodProduction[kind] = (st.foodProduction[kind] ?: 0) + threshed
+            }
+            st.cropStock[crop] = qty / SEED_SHARE
+        }
+        // herds, hunt, waters, gleanings
+        val meat = (pot.grazing * hands * MEAT_RATE).toInt()
+        val game = (pot.game * (1f - st.gamePressure / 1000f) * hands * GAME_RATE).toInt()
+        val fish = (pot.fish * (1f - st.fishPressure / 1000f) * hands * FISH_RATE).toInt()
+        val gathered = (pot.gathered * hands * GATHER_RATE).toInt()
+        if (meat > 0) {
+            st.food[FoodKind.MEAT] = (st.food[FoodKind.MEAT] ?: 0) + meat
+            st.foodProduction[FoodKind.MEAT] = (st.foodProduction[FoodKind.MEAT] ?: 0) + meat
+        }
+        if (game > 0) {
+            st.food[FoodKind.MEAT] = (st.food[FoodKind.MEAT] ?: 0) + game
+            st.foodProduction[FoodKind.MEAT] = (st.foodProduction[FoodKind.MEAT] ?: 0) + game
+            val bone = game / 10
+            if (bone > 0) {
+                st.materialStock[Material.BONE] = (st.materialStock[Material.BONE] ?: 0) + bone
+                st.materialProduced[Material.BONE] = (st.materialProduced[Material.BONE] ?: 0) + bone
+            }
+        }
+        if (fish > 0) {
+            st.food[FoodKind.FISH] = (st.food[FoodKind.FISH] ?: 0) + fish
+            st.foodProduction[FoodKind.FISH] = (st.foodProduction[FoodKind.FISH] ?: 0) + fish
+        }
+        if (gathered > 0) {
+            st.food[FoodKind.GATHERED] = (st.food[FoodKind.GATHERED] ?: 0) + gathered
+            st.foodProduction[FoodKind.GATHERED] = (st.foodProduction[FoodKind.GATHERED] ?: 0) + gathered
+        }
+        // forestry: the cut, the regrowth, the yard
+        if (st.timberInit > 0) {
+            val cut = minOf(st.timber, folk / TIMBER_FOLK_PER_LOG)
+            st.timber -= cut
+            st.timber = minOf(st.timberInit, st.timber + (pot.timber * 60f).toInt().coerceAtLeast(2))
+            if (cut > 0) {
+                st.stock[ResourceKind.TIMBER] = (st.stock[ResourceKind.TIMBER] ?: 0) + cut
+                st.production[ResourceKind.TIMBER] = cut
+                st.timberCut = cut
+            }
+            if (!st.timberGone && st.timberInit >= 300 && st.timber < st.timberInit / 10) {
+                st.timberGone = true
+                into += AgeEvent(
+                    year, AgeEventKind.RESOURCE_DEPLETED, site.id,
+                    text = "The woods about ${site.name} are cut out; its folk must look abroad for timber."
+                )
+            }
+        }
+        // clay: a renewable bed, dug and refilled by the slow earth
+        if (st.clayInit > 0) {
+            val take = minOf(st.clayBed, hands / CLAY_FOLK_PER_LOAD)
+            st.clayBed = minOf(
+                st.clayInit,
+                st.clayBed - take + (pot.clay * 30f).toInt().coerceAtLeast(1)
+            ).coerceAtLeast(0)
+            if (take > 0) {
+                st.stock[ResourceKind.CLAY] = (st.stock[ResourceKind.CLAY] ?: 0) + take
+                st.production[ResourceKind.CLAY] = take
+            }
+        }
+        // stone: a finite seam, opened by a real crew and closed when it runs out
+        if (st.stoneSeam > 0 && folk >= QUARRY_FOLK) {
+            val take = minOf(st.stoneSeam, hands / STONE_FOLK_PER_BLOCK)
+            if (take > 0) {
+                st.stoneSeam -= take
+                st.stock[ResourceKind.STONE] = (st.stock[ResourceKind.STONE] ?: 0) + take
+                st.production[ResourceKind.STONE] = take
+                if (!st.quarryOpened) {
+                    st.quarryOpened = true
+                    into += AgeEvent(
+                        year, AgeEventKind.QUARRY_OPENED, site.id,
+                        text = "A quarry was opened in the high ground above ${site.name}, and the first blocks came down."
+                    )
+                }
+                if (st.stoneSeam == 0 && !st.quarryClosed) {
+                    st.quarryClosed = true
+                    into += AgeEvent(
+                        year, AgeEventKind.QUARRY_CLOSED, site.id,
+                        text = "The quarry above ${site.name} is worked out; the last blocks came down this year."
+                    )
+                }
+            }
+        }
+        // salt: scraped where the shore and marsh give it, until they give no more
+        if (st.saltSeam > 0 && folk >= QUARRY_FOLK / 2) {
+            val take = minOf(st.saltSeam, folk / SALT_FOLK_PER_PAN + 1)
+            if (take > 0) {
+                st.saltSeam -= take
+                st.stock[ResourceKind.SALT] = (st.stock[ResourceKind.SALT] ?: 0) + take
+                st.production[ResourceKind.SALT] = take
+                if (!st.saltOpened) {
+                    st.saltOpened = true
+                    into += AgeEvent(
+                        year, AgeEventKind.MINE_OPENED, site.id,
+                        text = "The salt pans of ${site.name} were opened, and the first white harvest scraped."
+                    )
+                }
+                if (st.saltSeam == 0 && !st.saltClosed) {
+                    st.saltClosed = true
+                    into += AgeEvent(
+                        year, AgeEventKind.RESOURCE_DEPLETED, site.id,
+                        text = "The salt pans of ${site.name} yield no more; the ground has given all it had."
+                    )
+                }
+            }
+        }
+        // ore: deposits are found by growing folk, opened, worked, and worked out
+        for (dep in st.deposits) {
+            if (!dep.discovered) {
+                val character = characterOf(site)
+                val chance = 0.02f + folk / 4000f +
+                    if (character == LandCharacter.MOUNTAIN || character == LandCharacter.HILLS) 0.08f else 0.02f
+                if (rng(site.id, year, 61 + dep.material.ordinal).nextFloat() < chance) {
+                    dep.discovered = true
+                    into += AgeEvent(
+                        year, AgeEventKind.RESOURCE_DISCOVERED, site.id,
+                        text = "Veins of ${dep.material.label} were found in the ground about ${site.name}."
+                    )
+                }
+            } else if (dep.remaining > 0 && folk > 0) {
+                val take = (folk / ORE_FOLK_PER_LOAD).coerceAtMost(ORE_MAX_LOAD)
+                    .coerceAtLeast(2).coerceAtMost(dep.remaining)
+                dep.remaining -= take
+                st.oreStock[dep.material] = (st.oreStock[dep.material] ?: 0) + take
+                st.oreExtracted += take
+                if (!dep.announced) {
+                    dep.announced = true
+                    into += AgeEvent(
+                        year, AgeEventKind.MINE_OPENED, site.id,
+                        text = "The ${dep.material.label} diggings at ${site.name} were opened, and the first loads brought up."
+                    )
+                }
+                if (dep.remaining == 0) {
+                    into += AgeEvent(
+                        year, AgeEventKind.RESOURCE_DEPLETED, site.id,
+                        text = "The ${dep.material.label} diggings at ${site.name} are worked out; the pits stand empty."
+                    )
+                }
+            }
+        }
+        if (st.oreExtracted > 0) st.production[ResourceKind.ORE] = st.oreExtracted
+        // the year's burning and building draws the yards down
+        if (folk > 0) {
+            takeFrom(st.stock, ResourceKind.TIMBER, maxOf(1, folk / TIMBER_USE_FOLK))
+            takeFrom(st.stock, ResourceKind.CLAY, maxOf(1, folk / CLAY_USE_FOLK))
+            takeFrom(st.stock, ResourceKind.STONE, maxOf(1, folk / STONE_USE_FOLK))
+            takeFrom(st.stock, ResourceKind.SALT, maxOf(1, folk / SALT_USE_FOLK))
+        }
     }
 
     /** The waters and woods feel the hand that works them, and heal when left. */
@@ -419,116 +752,100 @@ class EconomySimulation private constructor(private val world: World) {
         st.gamePressure = (st.gamePressure + gameStrain - GAME_REGEN).coerceIn(0, PRESSURE_CAP)
     }
 
-    /** Wood is cut, the forest grows back; cut harder than it grows and it goes. */
-    private fun stepTimber(
-        year: Int,
-        site: Site,
-        folk: Int,
-        st: EcoState,
-        pot: ResourcePotential,
-        into: MutableList<AgeEvent>
-    ) {
-        if (st.timberInit <= 0) return
-        val cut = minOf(st.timber, folk / TIMBER_FOLK_PER_LOG)
-        st.timber -= cut
-        val regrowth = (pot.timber * 60f).toInt().coerceAtLeast(2)
-        st.timber = minOf(st.timberInit, st.timber + regrowth)
-        if (!st.timberGone && st.timberInit >= 300 && st.timber < st.timberInit / 10) {
-            st.timberGone = true
-            into += AgeEvent(
-                year, AgeEventKind.RESOURCE_DEPLETED, site.id,
-                text = "The woods about ${site.name} are cut out; its folk must look abroad for timber."
-            )
-        }
-    }
-
-    /** Diggings are found by growing folk, worked, and in time worked out. */
-    private fun stepDeposits(year: Int, site: Site, folk: Int, st: EcoState, into: MutableList<AgeEvent>) {
-        val character = characterOf(site)
-        for (dep in st.deposits) {
-            if (!dep.discovered) {
-                val chance = 0.02f + folk / 4000f +
-                    if (character == LandCharacter.MOUNTAIN || character == LandCharacter.HILLS) 0.08f else 0.02f
-                if (rng(site.id, year, 61 + dep.material.ordinal).nextFloat() < chance) {
-                    dep.discovered = true
-                    into += AgeEvent(
-                        year, AgeEventKind.RESOURCE_DISCOVERED, site.id,
-                        text = "Veins of ${dep.material.label} were found in the ground about ${site.name}."
-                    )
-                }
-            } else if (dep.remaining > 0) {
-                val take = (folk / ORE_FOLK_PER_LOAD).coerceAtMost(ORE_MAX_LOAD).coerceAtLeast(if (folk > 0) 2 else 0)
-                dep.remaining = (dep.remaining - take).coerceAtLeast(0)
-                if (dep.remaining == 0) {
-                    into += AgeEvent(
-                        year, AgeEventKind.RESOURCE_DEPLETED, site.id,
-                        text = "The ${dep.material.label} diggings at ${site.name} are worked out; the pits stand empty."
-                    )
-                }
+    /**
+     * The forge, the kiln and the sawpit: raw stock becomes worked material,
+     * and only where the hands and the town can support it. Every processed
+     * material has an economic cause — an input consumed.
+     */
+    private fun processMaterials(year: Int, site: Site, folk: Int, st: EcoState, into: MutableList<AgeEvent>) {
+        // the sawpit: half the yard's logs squared into lumber each year
+        if (folk >= LUMBER_FOLK) {
+            val yard = st.stock[ResourceKind.TIMBER] ?: 0
+            val convert = minOf(yard / 2, folk / 6)
+            if (convert > 0) {
+                takeFrom(st.stock, ResourceKind.TIMBER, convert)
+                st.materialStock[Material.ASHWOOD] = (st.materialStock[Material.ASHWOOD] ?: 0) + convert
+                st.materialProduced[Material.ASHWOOD] = (st.materialProduced[Material.ASHWOOD] ?: 0) + convert
             }
         }
-    }
-
-    /** The granary: what the year grew, what the roads brought, what was eaten. */
-    private fun stepFood(
-        year: Int,
-        site: Site,
-        folk: Int,
-        st: EcoState,
-        pot: ResourcePotential,
-        yields: FloatArray,
-        living: List<Site>,
-        into: MutableList<AgeEvent>,
-        hunger: MutableMap<Int, Int>
-    ) {
-        val production = yields[0] + yields[1] + yields[2] + yields[3] + yields[4]
-        var imported = 0f
-        for (key in st.routes) {
-            val route = parseRoute(key) ?: continue
-            val otherId = if (route.fromId == site.id) route.toId else route.fromId
-            val partner = living.firstOrNull { it.id == otherId } ?: continue
-            val ppot = potentialOf(partner)
-            if (route.resource in FOOD_RESOURCES && ppot[route.resource] > 0.45f) {
-                imported += (ppot[route.resource] * folk * IMPORT_RATE)
-                    .coerceAtMost(folk * FOOD_NEED * 0.25f)
-            }
-        }
-        val need = folk * FOOD_NEED
-        val intake = production + imported
-        val spoil = st.reserve / 25
-        st.reserve = (st.reserve + (intake - need).toInt() - spoil).coerceAtLeast(0)
-        val deficit = (need - intake).toInt()
-        // Granaries buffer the first lean years; only want that outlasts them
-        // puts hungry souls onto the roads.
-        if (deficit > 0 && production < need * 0.75f) {
-            st.famineStreak++
-            if (st.famineStreak >= FAMINE_STREAK_YEARS) {
-                val hungry = (deficit / FOOD_NEED).coerceAtMost(folk / 3)
-                if (hungry > 0) {
-                    hunger[site.id] = hungry
-                    if (hungry >= folk / 5) {
-                        into += AgeEvent(
-                            year, AgeEventKind.HARVEST_FAILURE, site.id, count = hungry,
-                            text = "The harvest failed at ${site.name}; the granary stands empty and ${hungry} souls went hungry."
-                        )
+        if (folk >= TOWN_FOLK) {
+            // the forge: ore smelted into metal
+            for ((material, qty) in st.oreStock.entries.toList()) {
+                val smelt = minOf(qty, folk / SMELT_FOLK_PER_LOAD)
+                if (smelt > 0) {
+                    st.oreStock[material] = qty - smelt
+                    st.materialStock[material] = (st.materialStock[material] ?: 0) + smelt
+                    st.materialProduced[material] = (st.materialProduced[material] ?: 0) + smelt
+                    if (material == Material.COPPER) {
+                        val green = smelt / 4
+                        if (green > 0) {
+                            st.materialStock[Material.VERDIGRIS] =
+                                (st.materialStock[Material.VERDIGRIS] ?: 0) + green
+                            st.materialProduced[Material.VERDIGRIS] =
+                                (st.materialProduced[Material.VERDIGRIS] ?: 0) + green
+                        }
                     }
                 }
-                st.famineStreak = 0
             }
-        } else {
-            st.famineStreak = 0
+            val region = geography.available(cultureOf(site)).toSet()
+            // temper brass: copper alloyed where the region's smiths know the secret
+            if (Material.BRASS in region) {
+                val alloy = minOf(st.materialStock[Material.COPPER] ?: 0, folk / 60)
+                if (alloy > 0) {
+                    st.materialStock[Material.COPPER] = (st.materialStock[Material.COPPER] ?: 0) - alloy
+                    st.materialStock[Material.BRASS] = (st.materialStock[Material.BRASS] ?: 0) + alloy
+                    st.materialProduced[Material.BRASS] = (st.materialProduced[Material.BRASS] ?: 0) + alloy
+                }
+            }
+            // grave-slate: quarried stone dressed for the masons
+            val dressed = minOf(st.stock[ResourceKind.STONE] ?: 0, folk / 60)
+            if (dressed > 0) {
+                takeFrom(st.stock, ResourceKind.STONE, dressed)
+                st.materialStock[Material.GRAVE_SLATE] = (st.materialStock[Material.GRAVE_SLATE] ?: 0) + dressed
+                st.materialProduced[Material.GRAVE_SLATE] = (st.materialProduced[Material.GRAVE_SLATE] ?: 0) + dressed
+            }
+            // salt-glass: salt burned into the strange clear stuff
+            val glass = minOf(st.stock[ResourceKind.SALT] ?: 0, folk / 80)
+            if (glass > 0) {
+                takeFrom(st.stock, ResourceKind.SALT, glass)
+                st.materialStock[Material.SALT_GLASS] = (st.materialStock[Material.SALT_GLASS] ?: 0) + glass
+                st.materialProduced[Material.SALT_GLASS] = (st.materialProduced[Material.SALT_GLASS] ?: 0) + glass
+            }
         }
-        if (!st.richYear && production > need * SURPLUS_GAIN && st.reserve > folk * RESERVE_RICH) {
-            st.richYear = true
-            into += AgeEvent(
-                year, AgeEventKind.HARVEST_SURPLUS, site.id,
-                text = "Granaries at ${site.name} stand full — a fat year the folk will remember."
-            )
+        // steel: the great forges only, where iron is worked long and hot
+        if (folk >= FORGE_FOLK) {
+            val hardened = minOf(st.materialStock[Material.IRON] ?: 0, folk / 40)
+            if (hardened > 0) {
+                st.materialStock[Material.IRON] = (st.materialStock[Material.IRON] ?: 0) - hardened
+                st.materialStock[Material.STEEL] = (st.materialStock[Material.STEEL] ?: 0) + hardened
+                st.materialProduced[Material.STEEL] = (st.materialProduced[Material.STEEL] ?: 0) + hardened
+            }
         }
-        if (st.richYear && st.reserve <= folk * RESERVE_RICH / 3) st.richYear = false
+        // the chronicle of industry: the first fire, and the cold forge
+        for ((material, made) in st.materialProduced) {
+            if (made > 0 && material !in st.industries) {
+                st.industries += material
+                into += AgeEvent(
+                    year, AgeEventKind.INDUSTRY_ESTABLISHED, site.id,
+                    text = "${material.adjective} work has taken hold at ${site.name}; the place is known for it now."
+                )
+            }
+        }
+        for (material in st.industries.toList()) {
+            if (material in st.declined || (st.materialProduced[material] ?: 0) > 0) continue
+            val oreGone = (st.oreStock[material] ?: 0) == 0 &&
+                st.deposits.none { it.material == material && it.remaining > 0 }
+            if (material in ORE_FED && oreGone) {
+                st.declined += material
+                into += AgeEvent(
+                    year, AgeEventKind.INDUSTRY_DECLINED, site.id,
+                    text = "The ${material.label} work at ${site.name} has failed — the ground that fed it is empty."
+                )
+            }
+        }
     }
 
-    /** Roads are beaten between what one place has and another lacks. */
+    /** Roads are beaten between a real surplus and a real want, and cargo actually moves. */
     private fun stepTrade(
         year: Int,
         site: Site,
@@ -547,27 +864,28 @@ class EconomySimulation private constructor(private val world: World) {
 
         for (partner in partners) {
             if (site.id > partner.id) continue // each pair once, alphabet of ids
-            val resource = complementaryResource(site, partner) ?: continue
-            val key = TradeRoute(site.id, partner.id, resource).key
-            if (st.routes.add(key)) {
-                stateOf(partner).routes.add(key)
-                into += AgeEvent(
-                    year, AgeEventKind.TRADE_ROUTE_OPENED, site.id, partner.id,
-                    text = "A trade road was opened between ${site.name} and ${partner.name} — " +
-                        "${partner.name} lacks ${resource.label} and ${site.name} has it to spare."
-                )
+            val other = stateOf(partner)
+            val pairPrefix = "${site.id}>${partner.id}:"
+            // the roads already running: cargo moves, or the road dries —
+            // walked in a settled order, so a save and a running world agree
+            for ((key, route) in st.routes.entries.sortedBy { it.key }) {
+                if (!key.startsWith(pairPrefix)) continue
+                moveCargo(year, site, st, partner, other, key, route, ledger, into)
+            }
+            // new roads: actual surplus meeting actual demand, either way round
+            val running = st.routes.keys.filter { it.startsWith(pairPrefix) }
+                .mapNotNull { parseRoute(it)?.cargo }.toSet()
+            if (!openRoad(year, site, st, partner, other, ledger, running, into)) {
+                openRoad(year, partner, other, site, st, ledger, running, into)
             }
         }
 
-        // A road is kept while its other end stands within reach and the
-        // complement still holds — whichever place first beat the road open.
-        val dead = st.routes.filter { key ->
+        // a road is kept while its other end stands within reach and alive
+        val dead = st.routes.keys.filter { key ->
             val route = parseRoute(key) ?: return@filter false
             val otherId = if (route.fromId == site.id) route.toId else route.fromId
             val other = living.firstOrNull { it.id == otherId }
-            val withinReach = other != null && distSq(site, other) <= TRADE_MAX_DIST_SQ &&
-                ledger.folkOf(other) > ROUTE_MIN_FOLK
-            !(withinReach && routeStillComplements(route))
+            !(other != null && distSq(site, other) <= TRADE_MAX_DIST_SQ && ledger.folkOf(other) > ROUTE_MIN_FOLK)
         }
         for (key in dead) {
             val route = parseRoute(key) ?: continue
@@ -582,6 +900,167 @@ class EconomySimulation private constructor(private val world: World) {
         }
     }
 
+    /** Move a road's cargo: whichever end has the surplus ships to the end with the want. */
+    private fun moveCargo(
+        year: Int,
+        a: Site,
+        stateA: EcoState,
+        b: Site,
+        stateB: EcoState,
+        key: String,
+        route: RouteState,
+        ledger: SettlementLedger,
+        into: MutableList<AgeEvent>
+    ) {
+        val folkA = ledger.folkOf(a).coerceAtLeast(0)
+        val folkB = ledger.folkOf(b).coerceAtLeast(0)
+        val capacity = (folkA + folkB) / 4 + 20
+        val qtyAtoB = minOf(
+            surplusOf(stateA, route.cargo, folkA),
+            demandOf(stateB, route.cargo, folkB),
+            capacity
+        ).coerceAtLeast(0)
+        if (qtyAtoB >= TRADE_MIN_CARGO) {
+            takeCargo(stateA, route.cargo, qtyAtoB)
+            giveCargo(stateB, route.cargo, qtyAtoB)
+            route.lastQty = qtyAtoB
+            route.strength++
+            route.dry = 0
+            stateB.routes[key]?.let {
+                it.lastQty = route.lastQty; it.strength = route.strength; it.dry = 0
+            }
+            if (route.strength == TRADE_STRENGTH_MILESTONE) {
+                into += AgeEvent(
+                    year, AgeEventKind.TRADE_ROUTE_STRENGTHENED, a.id, b.id,
+                    text = "The road between ${a.name} and ${b.name} has grown strong — ${route.cargo.lowercase()} " +
+                        "has crossed it year upon year, and the traffic is old news now."
+                )
+            }
+            return
+        }
+        val qtyBtoA = minOf(
+            surplusOf(stateB, route.cargo, folkB),
+            demandOf(stateA, route.cargo, folkA),
+            capacity
+        ).coerceAtLeast(0)
+        if (qtyBtoA >= TRADE_MIN_CARGO) {
+            takeCargo(stateB, route.cargo, qtyBtoA)
+            giveCargo(stateA, route.cargo, qtyBtoA)
+            route.lastQty = qtyBtoA
+            route.strength++
+            route.dry = 0
+            stateB.routes[key]?.let {
+                it.lastQty = route.lastQty; it.strength = route.strength; it.dry = 0
+            }
+            if (route.strength == TRADE_STRENGTH_MILESTONE) {
+                into += AgeEvent(
+                    year, AgeEventKind.TRADE_ROUTE_STRENGTHENED, a.id, b.id,
+                    text = "The road between ${a.name} and ${b.name} has grown strong — ${route.cargo.lowercase()} " +
+                        "has crossed it year upon year, and the traffic is old news now."
+                )
+            }
+            return
+        }
+        // nothing to carry: the road dries, and in time is forgotten
+        route.lastQty = 0
+        route.dry++
+        if (route.dry >= TRADE_DRY_YEARS) {
+            stateA.routes.remove(key)
+            stateB.routes.remove(key)
+            into += AgeEvent(
+                year, AgeEventKind.TRADE_ROUTE_CLOSED, a.id, b.id,
+                text = "The trade road between ${a.name} and ${b.name} fell quiet — neither end has cause to send wagons anymore."
+            )
+        }
+    }
+
+    /** Open a road from [from] to [to] when a real surplus meets a real want. */
+    private fun openRoad(
+        year: Int,
+        from: Site,
+        fromState: EcoState,
+        to: Site,
+        toState: EcoState,
+        ledger: SettlementLedger,
+        running: Set<String>,
+        into: MutableList<AgeEvent>
+    ): Boolean {
+        val folkFrom = ledger.folkOf(from).coerceAtLeast(0)
+        val folkTo = ledger.folkOf(to).coerceAtLeast(0)
+        for (cargo in candidateCargos(fromState)) {
+            if (cargo in running) continue
+            val surplus = surplusOf(fromState, cargo, folkFrom)
+            if (surplus < TRADE_MIN_CARGO) continue
+            val demand = demandOf(toState, cargo, folkTo)
+            if (demand < TRADE_MIN_CARGO) continue
+            val key = TradeRoute(from.id, to.id, cargo).key
+            fromState.routes[key] = RouteState(cargo, year)
+            toState.routes[key] = RouteState(cargo, year)
+            into += AgeEvent(
+                year, AgeEventKind.TRADE_ROUTE_OPENED, from.id, to.id,
+                text = "A trade road was opened between ${from.name} and ${to.name} — ${from.name} has " +
+                    "${cargoLabel(cargo)} to spare and ${to.name} wants it."
+            )
+            return true
+        }
+        return false
+    }
+
+    /** The granary: what the year grew, what the roads brought, what was eaten. */
+    private fun stepFood(
+        year: Int,
+        site: Site,
+        folk: Int,
+        st: EcoState,
+        into: MutableList<AgeEvent>,
+        hunger: MutableMap<Int, Int>
+    ) {
+        val opening = st.food.values.sum()
+        val production = st.foodProduction.values.sum()
+        val need = folk * FOOD_NEED
+        // the folk eat what the year and the roads brought
+        if (folk > 0 && opening > 0) {
+            val share = minOf(1f, need.toFloat() / opening)
+            for ((kind, qty) in st.food.entries.toList()) {
+                st.food[kind] = (qty - (qty * share).toInt()).coerceAtLeast(0)
+            }
+        }
+        // and a little spoils
+        for ((kind, qty) in st.food.entries.toList()) {
+            st.food[kind] = (qty - qty / 25).coerceAtLeast(0)
+        }
+        val deficit = (need - opening).coerceAtLeast(0)
+        // Granaries buffer the first lean years; only want that outlasts them
+        // puts hungry souls onto the roads.
+        if (deficit > 0 && production < need * 0.75f) {
+            st.famineStreak++
+            if (st.famineStreak >= FAMINE_STREAK_YEARS) {
+                val hungry = (deficit / FOOD_NEED).coerceAtMost(folk / 3)
+                if (hungry > 0) {
+                    hunger[site.id] = hungry
+                    st.cropStock.clear() // famine eats the seed corn
+                    if (hungry >= folk / 5) {
+                        into += AgeEvent(
+                            year, AgeEventKind.HARVEST_FAILURE, site.id, count = hungry,
+                            text = "The harvest failed at ${site.name}; the granary stands empty and ${hungry} souls went hungry."
+                        )
+                    }
+                }
+                st.famineStreak = 0
+            }
+        } else {
+            st.famineStreak = 0
+        }
+        if (!st.richYear && production > need * SURPLUS_GAIN && st.food.values.sum() > folk * RESERVE_RICH) {
+            st.richYear = true
+            into += AgeEvent(
+                year, AgeEventKind.HARVEST_SURPLUS, site.id,
+                text = "Granaries at ${site.name} stand full — a fat year the folk will remember."
+            )
+        }
+        if (st.richYear && st.food.values.sum() <= folk * RESERVE_RICH / 3) st.richYear = false
+    }
+
     /** What a place is known for, and the year it became known for it. */
     private fun stepSpecialization(
         year: Int,
@@ -593,44 +1072,133 @@ class EconomySimulation private constructor(private val world: World) {
         val newLabels = labelSet(site, folk, st)
         val prev = st.labels
         if (prev != null && newLabels != prev && folk >= SPECIALIZE_MIN_FOLK) {
-            into += AgeEvent(
-                year, AgeEventKind.SPECIALIZED, site.id,
-                text = "The folk of ${site.name} are now known for " +
-                    newLabels.joinToString(" and ") + "; the old days of " +
-                    prev.joinToString(" and ") + " are past."
-            )
+            val lost = prev.filter { it !in newLabels }
+            if (lost.isEmpty() || newLabels.size > prev.size) {
+                into += AgeEvent(
+                    year, AgeEventKind.SPECIALIZED, site.id,
+                    text = "The folk of ${site.name} are now known for " +
+                        newLabels.joinToString(" and ") + "; the old days of " +
+                        prev.joinToString(" and ") + " are past."
+                )
+            } else {
+                into += AgeEvent(
+                    year, AgeEventKind.ECONOMIC_DECLINE, site.id,
+                    text = if (newLabels.isEmpty()) {
+                        "The work of ${site.name} — ${lost.joinToString(" and ")} — is gone, and nothing has risen in its place."
+                    } else {
+                        "The ${lost.joinToString(" and ")} of ${site.name} are no more; its folk are known now for " +
+                            newLabels.joinToString(" and ") + "."
+                    }
+                )
+            }
         }
         st.labels = newLabels
     }
 
     // ---------------------------------------------------------- the trade law
 
-    /** The one resource whose complement would bind two places together. */
-    private fun complementaryResource(a: Site, b: Site): ResourceKind? {
-        val apot = potentialOf(a)
-        val bpot = potentialOf(b)
-        for (kind in ResourceKind.entries) {
-            if (kind == ResourceKind.ORE) continue
-            if (apot[kind] >= TRADE_RICH && bpot[kind] <= TRADE_POOR) return kind
-        }
-        // ore rides the roads only when one place has a working digging and the other none
-        val aOre = stateOf(a).deposits.any { it.discovered && it.remaining > 0 }
-        val bOre = stateOf(b).deposits.any { it.discovered && it.remaining > 0 }
-        if (aOre && !bOre && a.id < b.id) return ResourceKind.ORE
-        return null
+    /** The cargos a place could plausibly ship, in a deterministic order. */
+    private fun candidateCargos(st: EcoState): List<String> {
+        val list = mutableListOf<String>()
+        FoodKind.entries.forEach { list += it.name }
+        for (kind in SHIPPED_RESOURCES) list += kind.name
+        st.materialStock.keys.sortedBy { it.name }.forEach { list += it.name }
+        st.oreStock.keys.sortedBy { it.name }.forEach { list += it.name }
+        return list.distinct()
     }
 
-    private fun routeStillComplements(route: TradeRoute): Boolean {
-        if (route.resource == ResourceKind.ORE) {
-            val a = world.sites.firstOrNull { it.id == route.fromId } ?: return false
-            return stateOf(a).deposits.any { it.discovered && it.remaining > 0 }
+    /** What a place could spare of a cargo this year — from stock, not potential. */
+    private fun surplusOf(st: EcoState, cargo: String, folk: Int): Int {
+        foodCargo(cargo)?.let {
+            val total = st.food.values.sum()
+            return (total - folk * FOOD_NEED / 2).coerceAtLeast(0)
         }
-        val a = world.sites.firstOrNull { it.id == route.fromId } ?: return false
-        val b = world.sites.firstOrNull { it.id == route.toId } ?: return false
-        val apot = potentialOf(a)
-        val bpot = potentialOf(b)
-        return apot[route.resource] >= TRADE_RICH && bpot[route.resource] <= TRADE_POOR
+        bulkCargo(cargo)?.let { kind ->
+            val onHand = st.stock[kind] ?: 0
+            val keep = when (kind) {
+                ResourceKind.TIMBER -> folk / 4
+                ResourceKind.CLAY -> folk / 3
+                ResourceKind.STONE -> folk / 3
+                ResourceKind.SALT -> folk / 4
+                else -> 0
+            }
+            return (onHand - keep).coerceAtLeast(0)
+        }
+        matCargo(cargo)?.let { material ->
+            val onHand = st.materialStock[material] ?: 0
+            val oreOnHand = st.oreStock[material] ?: 0
+            val worksIt = oreOnHand > 0 || st.deposits.any { it.material == material && it.remaining > 0 }
+            val keep = if (worksIt) folk / 10 else 0
+            return (onHand + oreOnHand / 2 - keep).coerceAtLeast(0)
+        }
+        return 0
     }
+
+    /** What a place truly wants of a cargo — a shortfall or an empty yard. */
+    private fun demandOf(st: EcoState, cargo: String, folk: Int): Int {
+        foodCargo(cargo)?.let {
+            val total = st.food.values.sum()
+            return (folk * FOOD_NEED - total).coerceAtLeast(0)
+        }
+        bulkCargo(cargo)?.let { kind ->
+            val onHand = st.stock[kind] ?: 0
+            val wanted = when (kind) {
+                ResourceKind.TIMBER -> folk / TIMBER_USE_FOLK * 3
+                ResourceKind.CLAY -> folk / CLAY_USE_FOLK * 3
+                ResourceKind.STONE -> folk / STONE_USE_FOLK * 3
+                ResourceKind.SALT -> folk / SALT_USE_FOLK * 3
+                else -> 0
+            }
+            return (wanted - onHand).coerceAtLeast(0)
+        }
+        matCargo(cargo)?.let { material ->
+            val hasSupply = (st.materialStock[material] ?: 0) > 0 || (st.oreStock[material] ?: 0) > 0 ||
+                st.deposits.any { it.material == material && it.discovered && it.remaining > 0 }
+            if (hasSupply || folk < TRADE_DEMAND_FOLK) return 0
+            return folk / 20
+        }
+        return 0
+    }
+
+    /** Take a shipment out of a place's stores. */
+    private fun takeCargo(st: EcoState, cargo: String, qty: Int) {
+        foodCargo(cargo)?.let {
+            st.food[it] = ((st.food[it] ?: 0) - qty).coerceAtLeast(0)
+            return
+        }
+        bulkCargo(cargo)?.let {
+            takeFrom(st.stock, it, qty)
+            return
+        }
+        matCargo(cargo)?.let { material ->
+            val ore = st.oreStock[material] ?: 0
+            val fromOre = minOf(ore, qty / 2)
+            st.oreStock[material] = ore - fromOre
+            st.materialStock[material] = ((st.materialStock[material] ?: 0) - (qty - fromOre)).coerceAtLeast(0)
+        }
+    }
+
+    /** Set a shipment down in a place's stores. Raw metal arrives as ore for the forge. */
+    private fun giveCargo(st: EcoState, cargo: String, qty: Int) {
+        foodCargo(cargo)?.let {
+            st.food[it] = (st.food[it] ?: 0) + qty
+            return
+        }
+        bulkCargo(cargo)?.let {
+            st.stock[it] = (st.stock[it] ?: 0) + qty
+            return
+        }
+        matCargo(cargo)?.let {
+            st.oreStock[it] = (st.oreStock[it] ?: 0) + qty
+        }
+    }
+
+    private fun foodCargo(cargo: String): FoodKind? = FoodKind.entries.firstOrNull { it.name == cargo }
+    private fun bulkCargo(cargo: String): ResourceKind? = SHIPPED_RESOURCES.firstOrNull { it.name == cargo }
+    private fun matCargo(cargo: String): Material? = Material.entries.firstOrNull { it.name == cargo }
+
+    private fun cargoLabel(cargo: String): String =
+        foodCargo(cargo)?.label ?: bulkCargo(cargo)?.label ?: matCargo(cargo)?.label ?: cargo.lowercase()
 
     private fun parseRoute(key: String): TradeRoute? {
         val halves = key.split(">")
@@ -639,33 +1207,36 @@ class EconomySimulation private constructor(private val world: World) {
         if (rest.size != 2) return null
         val fromId = halves[0].toIntOrNull() ?: return null
         val toId = rest[0].toIntOrNull() ?: return null
-        val resource = ResourceKind.entries.firstOrNull { it.name == rest[1] } ?: return null
-        return TradeRoute(fromId, toId, resource)
+        return TradeRoute(fromId, toId, rest[1])
     }
 
     // -------------------------------------------------------- the material law
 
-    /** What the ground and woods of a place yield with its own hands. */
+    /**
+     * What a place can put its hands on with its own work: stock on hand, ore
+     * being dug, woods being cut, herds being hunted. Potential alone is
+     * nothing — an undiscovered deposit is not iron in anyone's hands.
+     */
     private fun localMaterials(site: Site, folk: Int, st: EcoState): Set<Material> {
-        val pot = potentialOf(site)
         val local = mutableSetOf<Material>()
         for (dep in st.deposits) {
-            if (dep.discovered && dep.remaining > 0) local += dep.material
+            if ((dep.announced && dep.remaining > 0 && folk > 0) || (st.oreStock[dep.material] ?: 0) > 0) {
+                local += dep.material
+            }
         }
-        if (st.timber > 0 && pot.timber > 0.25f) local += Material.ASHWOOD
-        if (pot.grazing > 0.30f || pot.game > 0.30f) local += Material.BONE
-        if (Material.COPPER in local) local += Material.VERDIGRIS
-        val forgeTown = folk >= TOWN_FOLK
-        if (forgeTown && (Material.COPPER in local || Material.LEAD in local)) local += Material.BRASS
-        if (forgeTown && (Material.IRON in local || Material.BOG_IRON in local)) local += Material.STEEL
-        if (pot.salt > 0.5f) local += Material.SALT_GLASS
-        if (pot.stone > 0.55f) local += Material.GRAVE_SLATE
+        for ((material, qty) in st.materialStock) {
+            if (qty > 0) local += material
+        }
+        if (st.timberCut > 0 || (st.stock[ResourceKind.TIMBER] ?: 0) > 0) local += Material.ASHWOOD
+        if ((st.foodProduction[FoodKind.MEAT] ?: 0) > 0) local += Material.BONE
         return local
     }
 
     /**
      * The full material report for a place: every material the world knows,
-     * marked LOCAL, IMPORTED (naming the road's other end), or SCARCE.
+     * marked LOCAL (its own work can produce it), IMPORTED (a road that
+     * actually carries it, from an end that truly holds it), or SCARCE
+     * (neither production, stock, nor trade can supply it).
      */
     fun materialReport(site: Site, ledger: SettlementLedger, sites: List<Site>): List<MaterialProvenance> =
         Material.entries.map { provenanceOf(site, ledger, sites, it) }
@@ -673,14 +1244,13 @@ class EconomySimulation private constructor(private val world: World) {
     /** One material's answer: can this place obtain it, and from where? */
     fun provenanceOf(site: Site, ledger: SettlementLedger, sites: List<Site>, material: Material): MaterialProvenance {
         val st = stateOf(site)
-        val regionAvailable = material in geography.available(cultureOf(site))
-        if (regionAvailable && material in localMaterials(site, ledger.folkOf(site).coerceAtLeast(0), st)) {
+        if (material in localMaterials(site, ledger.folkOf(site).coerceAtLeast(0), st)) {
             return MaterialProvenance(material, MaterialSource.LOCAL)
         }
-        if (!regionAvailable) return MaterialProvenance(material, MaterialSource.SCARCE)
         // one road's reach: a partner's own hands, not a partner's imports
-        for (key in st.routes) {
+        for (key in st.routes.keys) {
             val route = parseRoute(key) ?: continue
+            if (route.cargo != material.name) continue
             val otherId = if (route.fromId == site.id) route.toId else route.fromId
             val partner = sites.firstOrNull { it.id == otherId } ?: continue
             if (material in localMaterials(partner, ledger.folkOf(partner).coerceAtLeast(0), stateOf(partner))) {
@@ -692,21 +1262,20 @@ class EconomySimulation private constructor(private val world: World) {
 
     // ------------------------------------------------------------ the identity
 
-    /** The work a place is known by, from what it actually produces. */
+    /** The work a place is known by, from what it actually produced — not what it could. */
     private fun labelSet(site: Site, folk: Int, st: EcoState): List<String> {
         if (folk <= 0) return emptyList()
-        val pot = potentialOf(site)
-        val labels = mutableListOf<String>()
-        val yields = yieldsOf(site, folk, st, pot)
         val need = folk * FOOD_NEED
-        if (yields[0] > need * 0.7f) labels += "farming"
-        if (yields[3] > need * 0.35f && pot.fish > 0.35f) labels += "fishing"
-        if (pot.grazing * MEAT_RATE > FOOD_NEED * 0.35f) labels += "pastoral"
-        if (st.timber > 100 && pot.timber > 0.45f) labels += "logging"
-        if (st.deposits.any { it.discovered && it.remaining > 0 }) labels += "mining"
-        if (pot.clay > 0.5f && folk >= 100) labels += "brickworking"
-        if (pot.stone > 0.55f && folk >= 100) labels += "quarrying"
-        if (pot.salt > 0.5f) labels += "salting"
+        val labels = mutableListOf<String>()
+        val gardenFood = (st.foodProduction[FoodKind.GRAIN] ?: 0) + (st.foodProduction[FoodKind.PRODUCE] ?: 0)
+        if (gardenFood > need * 0.7f) labels += "farming"
+        if ((st.foodProduction[FoodKind.FISH] ?: 0) > need * 0.35f) labels += "fishing"
+        if ((st.foodProduction[FoodKind.MEAT] ?: 0) > need * 0.35f) labels += "pastoral"
+        if ((st.production[ResourceKind.TIMBER] ?: 0) > 40) labels += "logging"
+        if ((st.production[ResourceKind.ORE] ?: 0) > 0) labels += "mining"
+        if ((st.production[ResourceKind.STONE] ?: 0) > 0) labels += "quarrying"
+        if ((st.production[ResourceKind.CLAY] ?: 0) > 0) labels += "brickworking"
+        if ((st.production[ResourceKind.SALT] ?: 0) > 0) labels += "salting"
         if (st.routes.size >= 2) labels += "trade hub"
         if (labels.isEmpty()) labels += "gleaning"
         return labels
@@ -721,13 +1290,27 @@ class EconomySimulation private constructor(private val world: World) {
             "=${if (st.timberGone) 1 else 0}" +
             "=${st.fishPressure}" +
             "=${st.gamePressure}" +
-            "=${st.reserve}" +
+            "=${st.food.values.sum()}" + // the granary, as older saves knew it
             "=${if (st.richYear) 1 else 0}" +
             "=${st.crops.entries.joinToString(",") { "${it.key.name}:${it.value}" }}" +
-            "=${st.deposits.joinToString(",") { "${it.material.name}:${it.remaining}:${if (it.discovered) 1 else 0}" }}" +
-            "=${st.routes.sorted().joinToString(",")}" +
+            "=${st.deposits.joinToString(",") { "${it.material.name}:${it.remaining}:${if (it.discovered) 1 else 0}:${if (it.announced) 1 else 0}" }}" +
+            "=${st.routes.entries.sortedBy { it.key }.joinToString(",") { (key, r) ->
+                "$key@${r.since}@${r.strength}@${r.lastQty}@${r.dry}"
+            }}" +
             "=${(st.labels ?: emptyList()).joinToString(",")}" +
-            "=${st.famineStreak}"
+            "=${st.famineStreak}" +
+            "=${st.food.entries.joinToString(",") { "${it.key.name}:${it.value}" }}" +
+            "=${st.stock.entries.sortedBy { it.key.name }.joinToString(",") { "${it.key.name}:${it.value}" }}" +
+            "=${st.cropStock.entries.joinToString(",") { "${it.key.name}:${it.value}" }}" +
+            "=${st.stoneSeam}:${st.saltSeam}:${st.clayBed}:${st.clayInit}" +
+            "=${st.oreStock.entries.sortedBy { it.key.name }.joinToString(",") { "${it.key.name}:${it.value}" }}" +
+            "=${st.materialStock.entries.sortedBy { it.key.name }.joinToString(",") { "${it.key.name}:${it.value}" }}" +
+            "=${st.industries.sortedBy { it.name }.joinToString(",")}" +
+            "=${st.declined.sortedBy { it.name }.joinToString(",")}" +
+            "=${st.production.entries.sortedBy { it.key.name }.joinToString(",") { "${it.key.name}:${it.value}" }}" +
+            "=${st.foodProduction.entries.joinToString(",") { "${it.key.name}:${it.value}" }}" +
+            "=${st.timberCut}" +
+            "=${listOf(st.quarryOpened, st.saltOpened, st.quarryClosed, st.saltClosed).joinToString("") { if (it) "1" else "0" }}"
     }
 
     /** Wake from the save; a blank string wakes clean, as old saves always have. */
@@ -743,7 +1326,7 @@ class EconomySimulation private constructor(private val world: World) {
             st.timberGone = parts[2] == "1"
             st.fishPressure = (parts[3].toIntOrNull() ?: 0).coerceIn(0, PRESSURE_CAP)
             st.gamePressure = (parts[4].toIntOrNull() ?: 0).coerceIn(0, PRESSURE_CAP)
-            st.reserve = parts[5].toIntOrNull() ?: 0
+            val legacyReserve = parts[5].toIntOrNull() ?: 0
             st.richYear = parts[6] == "1"
             parts[7].takeIf { it.isNotBlank() }?.split(",")?.forEach { entry ->
                 val kv = entry.split(":")
@@ -756,12 +1339,82 @@ class EconomySimulation private constructor(private val world: World) {
                 val dep = st.deposits.firstOrNull { it.material == material } ?: return@forEach
                 dep.remaining = kv.getOrNull(1)?.toIntOrNull() ?: dep.remaining
                 dep.discovered = kv.getOrNull(2) == "1"
+                dep.announced = kv.getOrNull(3) == "1"
             }
-            parts[9].takeIf { it.isNotBlank() }?.split(",")?.filter { it.isNotBlank() }?.let {
-                st.routes.addAll(it)
+            parts[9].takeIf { it.isNotBlank() }?.split(",")?.forEach { entry ->
+                val halves = entry.split("@")
+                val key = halves[0]
+                if (!key.contains(">") || !key.contains(":")) return@forEach
+                st.routes[key] = RouteState(
+                    key.substringAfterLast(':'),
+                    halves.getOrNull(1)?.toIntOrNull() ?: 0,
+                    halves.getOrNull(2)?.toIntOrNull() ?: 0,
+                    halves.getOrNull(3)?.toIntOrNull() ?: 0,
+                    halves.getOrNull(4)?.toIntOrNull() ?: 0
+                )
             }
             parts.getOrNull(10)?.takeIf { it.isNotBlank() }?.split(",")?.let { st.labels = it }
             st.famineStreak = parts.getOrNull(11)?.toIntOrNull() ?: 0
+            // the broad stores: new saves carry the breakdown, old saves one granary number
+            val foodField = parts.getOrNull(12)
+            if (foodField != null) {
+                foodField.takeIf { it.isNotBlank() }?.split(",")?.forEach { entry ->
+                    val kv = entry.split(":")
+                    val kind = FoodKind.entries.firstOrNull { it.name == kv[0] } ?: return@forEach
+                    st.food[kind] = kv.getOrNull(1)?.toIntOrNull() ?: 0
+                }
+            } else if (legacyReserve > 0) {
+                st.food[FoodKind.GRAIN] = legacyReserve
+            }
+            parts.getOrNull(13)?.takeIf { it.isNotBlank() }?.split(",")?.forEach { entry ->
+                val kv = entry.split(":")
+                val kind = ResourceKind.entries.firstOrNull { it.name == kv[0] } ?: return@forEach
+                st.stock[kind] = kv.getOrNull(1)?.toIntOrNull() ?: 0
+            }
+            parts.getOrNull(14)?.takeIf { it.isNotBlank() }?.split(",")?.forEach { entry ->
+                val kv = entry.split(":")
+                val crop = CropKind.entries.firstOrNull { it.name == kv[0] } ?: return@forEach
+                st.cropStock[crop] = kv.getOrNull(1)?.toIntOrNull() ?: 0
+            }
+            parts.getOrNull(15)?.takeIf { it.isNotBlank() }?.split(":")?.let { seams ->
+                st.stoneSeam = seams.getOrNull(0)?.toIntOrNull() ?: st.stoneSeam
+                st.saltSeam = seams.getOrNull(1)?.toIntOrNull() ?: st.saltSeam
+                st.clayBed = seams.getOrNull(2)?.toIntOrNull() ?: st.clayBed
+                st.clayInit = seams.getOrNull(3)?.toIntOrNull() ?: st.clayInit
+            }
+            parts.getOrNull(16)?.takeIf { it.isNotBlank() }?.split(",")?.forEach { entry ->
+                val kv = entry.split(":")
+                val material = Material.entries.firstOrNull { it.name == kv[0] } ?: return@forEach
+                st.oreStock[material] = kv.getOrNull(1)?.toIntOrNull() ?: 0
+            }
+            parts.getOrNull(17)?.takeIf { it.isNotBlank() }?.split(",")?.forEach { entry ->
+                val kv = entry.split(":")
+                val material = Material.entries.firstOrNull { it.name == kv[0] } ?: return@forEach
+                st.materialStock[material] = kv.getOrNull(1)?.toIntOrNull() ?: 0
+            }
+            parts.getOrNull(18)?.takeIf { it.isNotBlank() }?.split(",")?.forEach { entry ->
+                Material.entries.firstOrNull { it.name == entry }?.let { st.industries += it }
+            }
+            parts.getOrNull(19)?.takeIf { it.isNotBlank() }?.split(",")?.forEach { entry ->
+                Material.entries.firstOrNull { it.name == entry }?.let { st.declined += it }
+            }
+            parts.getOrNull(20)?.takeIf { it.isNotBlank() }?.split(",")?.forEach { entry ->
+                val kv = entry.split(":")
+                val kind = ResourceKind.entries.firstOrNull { it.name == kv[0] } ?: return@forEach
+                st.production[kind] = kv.getOrNull(1)?.toIntOrNull() ?: 0
+            }
+            parts.getOrNull(21)?.takeIf { it.isNotBlank() }?.split(",")?.forEach { entry ->
+                val kv = entry.split(":")
+                val kind = FoodKind.entries.firstOrNull { it.name == kv[0] } ?: return@forEach
+                st.foodProduction[kind] = kv.getOrNull(1)?.toIntOrNull() ?: 0
+            }
+            st.timberCut = parts.getOrNull(22)?.toIntOrNull() ?: 0
+            parts.getOrNull(23)?.takeIf { it.length >= 4 }?.let { flags ->
+                st.quarryOpened = flags[0] == '1'
+                st.saltOpened = flags[1] == '1'
+                st.quarryClosed = flags[2] == '1'
+                st.saltClosed = flags[3] == '1'
+            }
         }
     }
 
@@ -774,6 +1427,10 @@ class EconomySimulation private constructor(private val world: World) {
         val dx = a.x - b.x
         val dy = a.y - b.y
         return dx * dx + dy * dy
+    }
+
+    private fun takeFrom(stock: MutableMap<ResourceKind, Int>, kind: ResourceKind, qty: Int) {
+        stock[kind] = ((stock[kind] ?: 0) - qty).coerceAtLeast(0)
     }
 
     companion object {
@@ -789,29 +1446,55 @@ class EconomySimulation private constructor(private val world: World) {
         const val GAME_RATE = 4f
         const val FISH_RATE = 12f
         const val GATHER_RATE = 5f
-        const val IMPORT_RATE = 6f
         const val TIMBER_FOLK_PER_LOG = 8
+        const val TIMBER_USE_FOLK = 12
+        const val CLAY_FOLK_PER_LOAD = 10
+        const val CLAY_USE_FOLK = 90
+        const val STONE_FOLK_PER_BLOCK = 15
+        const val STONE_USE_FOLK = 100
+        const val SALT_FOLK_PER_PAN = 40
+        const val SALT_USE_FOLK = 60
         const val ORE_FOLK_PER_LOAD = 12
         const val ORE_MAX_LOAD = 80
+        const val SMELT_FOLK_PER_LOAD = 20
         const val FISH_REGEN = 40
         const val GAME_REGEN = 30
         const val PRESSURE_CAP = 850
         const val TRADE_PARTNERS = 2
         const val TRADE_MAX_DIST_SQ = 0.09f
-        const val TRADE_RICH = 0.6f
-        const val TRADE_POOR = 0.25f
+        /** A road is not beaten for a basket: the least that counts as surplus or want. */
+        const val TRADE_MIN_CARGO = 10
+        const val TRADE_DRY_YEARS = 3
+        const val TRADE_STRENGTH_MILESTONE = 10
+        const val TRADE_DEMAND_FOLK = 100
         const val ROUTE_MIN_FOLK = 5
         const val ADOPT_FLOOR = 0.10f
+        const val ADOPT_CHANCE = 0.28f
+        /** Below this many souls the fields go back to brush. */
+        const val MIN_FIELD_FOLK = 10
         const val SURPLUS_GAIN = 1.45f
         const val RESERVE_RICH = 8
         const val TOWN_FOLK = 320
+        const val FORGE_FOLK = 800
+        const val QUARRY_FOLK = 40
+        const val LUMBER_FOLK = 40
         const val SPECIALIZE_MIN_FOLK = 40
+        /** One part in this many of the harvest is kept for next year's sowing. */
+        const val SEED_SHARE = 10
+        /** A place needs this much salt in its band before pans are worth scraping. */
+        const val SALT_SEAM_FLOOR = 0.6f
 
         private const val ENTRY = "\u001E"
 
-        private val FOOD_RESOURCES = setOf(
-            ResourceKind.GRAIN, ResourceKind.GRAZING, ResourceKind.GAME,
-            ResourceKind.FISH, ResourceKind.GATHERED
+        /** The bulk goods that ride the roads as themselves. */
+        private val SHIPPED_RESOURCES = listOf(
+            ResourceKind.TIMBER, ResourceKind.CLAY, ResourceKind.STONE, ResourceKind.SALT
+        )
+
+        /** Materials that come out of the ground as ore. */
+        private val ORE_FED = setOf(
+            Material.BOG_IRON, Material.COPPER, Material.IRON, Material.LEAD,
+            Material.SILVER, Material.GOLD, Material.STAR_IRON, Material.SPIRIT_SILVER, Material.EARTH_BONE
         )
 
         /** A fresh economy for a fresh world: untouched ground everywhere. */

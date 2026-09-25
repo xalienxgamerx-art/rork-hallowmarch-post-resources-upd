@@ -253,7 +253,7 @@ class TerrainMap(
         return heights[cy * size + cx]
     }
 
-    private fun moistureAt(nx: Float, ny: Float): Float {
+    fun moistureAt(nx: Float, ny: Float): Float {
         val cx = (nx.coerceIn(0f, 0.999f) * size).toInt()
         val cy = (ny.coerceIn(0f, 0.999f) * size).toInt()
         return moisture[cy * size + cx]

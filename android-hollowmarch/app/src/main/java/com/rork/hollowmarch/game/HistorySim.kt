@@ -33,7 +33,16 @@ enum class AgeEventKind(val label: String) {
     HARVEST_SURPLUS("a fat year"),
     TRADE_ROUTE_OPENED("a trade road opened"),
     TRADE_ROUTE_CLOSED("a trade road closed"),
-    SPECIALIZED("a people found their trade")
+    TRADE_ROUTE_STRENGTHENED("a trade road grew strong"),
+    SPECIALIZED("a people found their trade"),
+    ECONOMIC_DECLINE("a trade withered"),
+    CROP_ESTABLISHED("a crop took hold"),
+    CROP_LOST("a crop was lost"),
+    MINE_OPENED("a mine was opened"),
+    QUARRY_OPENED("a quarry was opened"),
+    QUARRY_CLOSED("a quarry was closed"),
+    INDUSTRY_ESTABLISHED("an industry was born"),
+    INDUSTRY_DECLINED("an industry failed")
 }
 
 /**
@@ -63,7 +72,16 @@ data class AgeEvent(
         AgeEventKind.HARVEST_SURPLUS -> ChronicleEvent(year, EventKind.GROWTH, text)
         AgeEventKind.TRADE_ROUTE_OPENED -> ChronicleEvent(year, EventKind.TAVERN, text)
         AgeEventKind.TRADE_ROUTE_CLOSED -> ChronicleEvent(year, EventKind.RUIN, text)
+        AgeEventKind.TRADE_ROUTE_STRENGTHENED -> ChronicleEvent(year, EventKind.TAVERN, text)
         AgeEventKind.SPECIALIZED -> ChronicleEvent(year, EventKind.GROWTH, text)
+        AgeEventKind.ECONOMIC_DECLINE -> ChronicleEvent(year, EventKind.RUIN, text)
+        AgeEventKind.CROP_ESTABLISHED -> ChronicleEvent(year, EventKind.GROWTH, text)
+        AgeEventKind.CROP_LOST -> ChronicleEvent(year, EventKind.RUIN, text)
+        AgeEventKind.MINE_OPENED -> ChronicleEvent(year, EventKind.CLAIM, text)
+        AgeEventKind.QUARRY_OPENED -> ChronicleEvent(year, EventKind.CLAIM, text)
+        AgeEventKind.QUARRY_CLOSED -> ChronicleEvent(year, EventKind.RUIN, text)
+        AgeEventKind.INDUSTRY_ESTABLISHED -> ChronicleEvent(year, EventKind.GUILDHALL, text)
+        AgeEventKind.INDUSTRY_DECLINED -> ChronicleEvent(year, EventKind.RUIN, text)
     }
 }
 

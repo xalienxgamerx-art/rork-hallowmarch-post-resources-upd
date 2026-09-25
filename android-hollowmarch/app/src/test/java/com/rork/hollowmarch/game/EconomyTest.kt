@@ -1,5 +1,6 @@
 package com.rork.hollowmarch.game
 
+import com.rork.hollowmarch.world.Biome
 import com.rork.hollowmarch.world.Site
 import com.rork.hollowmarch.world.World
 import com.rork.hollowmarch.world.WorldGenerator
@@ -11,10 +12,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The economy layer: what the land could yield, what each place sows and
- * reaps, what it eats, which materials it can reach and from where, and who
- * trades with whom. All of it the seed's own — same seed, same years, same
- * harvests forever — and its residue rides the save whole.
+ * The economy layer: the world's own ground decides what each place could
+ * produce, hands and capability decide what it does produce, production
+ * becomes stock, stock feeds folk and roads, and roads move real cargo
+ * between a real surplus and a real want. All of it the seed's own — same
+ * seed, same world, same years, same ledgers forever.
  */
 class EconomyTest {
 
@@ -62,7 +64,7 @@ class EconomyTest {
     private fun foodPerSoul(site: Site): Float {
         val pot = reader.potentialOf(site)
         val bestSuit = CropKind.entries.maxOf { it.suitability(reader.profileOf(site)) }
-        return pot.grain * bestSuit * EconomySimulation.CROP_RATE +
+        return bestSuit * EconomySimulation.CROP_RATE +
             pot.grazing * EconomySimulation.MEAT_RATE +
             pot.game * EconomySimulation.GAME_RATE +
             pot.fish * EconomySimulation.FISH_RATE +
@@ -72,6 +74,11 @@ class EconomyTest {
     private fun bestLand(): Site = sites.maxBy { foodPerSoul(it) }
     private fun worstLand(): Site = sites.minBy { foodPerSoul(it) }
     private fun woodiestLand(): Site = sites.maxBy { reader.potentialOf(it).timber }
+
+    /** The most arable ground in the province, by the crops' own judgment. */
+    private fun bestArable(): Site = sites.maxBy { site ->
+        CropKind.entries.maxOf { it.suitability(reader.profileOf(site)) }
+    }
 
     private fun siteWithDeposits(): Site? =
         sites.firstOrNull { reader.depositsOf(it).isNotEmpty() }
@@ -92,6 +99,18 @@ class EconomyTest {
         return best
     }
 
+    /** A crafted economy save entry for one site, given per-field overrides. */
+    private fun craftedEntry(siteId: Int, fields: Map<Int, String>): String {
+        val parts = MutableList(24) { "" }
+        parts[0] = "S$siteId"
+        (1..6).forEach { parts[it] = "0" }
+        parts[11] = "0"
+        parts[22] = "0"
+        parts[23] = "0000"
+        fields.forEach { (index, value) -> parts[index] = value }
+        return parts.joinToString("=")
+    }
+
     // ------------------------------------------------------------------ terrain
 
     @Test
@@ -102,11 +121,49 @@ class EconomyTest {
             assertEquals(reader.potentialOf(site), other.potentialOf(site))
             assertEquals(Ecology.potentialOf(Ecology.profileOf(world, site)), reader.potentialOf(site))
         }
-        assertNotEquals(
+        assertTrue(
             "the province is not one flat field",
-            reader.profileOf(sites.first()),
-            reader.profileOf(sites.last())
+            sites.map { reader.profileOf(it) }.distinct().size > 1
         )
+    }
+
+    @Test
+    fun theEconomyReadsTheWorldsOwnGround() {
+        val terrain = world.terrain
+        for (site in sites) {
+            val profile = reader.profileOf(site)
+            assertEquals(
+                "elevation comes from the province's own heights",
+                terrain.heightAt(site.x, site.y),
+                profile.elevation,
+                0.0001f
+            )
+            assertEquals(
+                "wetness comes from the province's own moisture",
+                terrain.moistureAt(site.x, site.y),
+                profile.moisture,
+                0.0001f
+            )
+            assertEquals(
+                "the classification is the map's own",
+                terrain.biomeAt(site.x, site.y),
+                profile.biome
+            )
+            assertEquals(
+                "dense woodland stands exactly where the map says forest",
+                profile.biome == Biome.FOREST,
+                profile.forest > 0.5f
+            )
+        }
+        // a forested ground gives timber potential a plain cannot
+        val forested = sites.filter { reader.profileOf(it).biome == Biome.FOREST }
+        val bare = sites.filter { reader.profileOf(it).biome != Biome.FOREST }
+        if (forested.isNotEmpty() && bare.isNotEmpty()) {
+            assertTrue(
+                "timber potential follows the map's woods",
+                reader.potentialOf(forested.first()).timber > reader.potentialOf(bare.first()).timber
+            )
+        }
     }
 
     @Test
@@ -188,16 +245,49 @@ class EconomyTest {
     @Test
     fun cropsArriveGetEstablishedAndFeed() {
         val economy = EconomySimulation.fresh(world)
-        val site = bestLand()
+        val site = bestArable()
         val ledger = SettlementLedger.fresh(world)
-        runYears(economy, 20, 120, ledger)
+        val events = runYears(economy, 20, 120, ledger)
         val stages = economy.cropsOf(site)
         assertTrue("something was sown at ${site.name}", stages.isNotEmpty())
         assertTrue(
             "a sown field grows sure with the years",
             stages.values.any { it == CropStage.ESTABLISHED }
         )
+        assertTrue(
+            "the chronicle remembers the crop that took hold",
+            events.any { it.kind == AgeEventKind.CROP_ESTABLISHED && it.siteId == site.id }
+        )
         assertTrue("a fed place keeps a granary", economy.reserveOf(site) > 0)
+    }
+
+    @Test
+    fun cropsKeepTheirOwnStocksBeforeBecomingFood() {
+        val economy = EconomySimulation.fresh(world)
+        val site = bestArable()
+        runYears(economy, 20, 200)
+        val barn = economy.cropStockOf(site)
+        assertTrue("the seed barn is not empty on sown land", barn.isNotEmpty())
+        barn.forEach { (crop, qty) ->
+            assertTrue("$crop keeps only its seed corn", qty <= 400)
+            assertTrue("no crop carries a debt", qty >= 0)
+        }
+        // the threshed harvest stands in the granary under its own kind
+        val stores = economy.foodOf(site)
+        assertTrue(
+            "threshed grain and produce keep their names",
+            stores.containsKey(FoodKind.GRAIN) || stores.containsKey(FoodKind.PRODUCE)
+        )
+    }
+
+    @Test
+    fun abandonedFieldsGoBackToBrush() {
+        val economy = EconomySimulation.fresh(world)
+        val events = runYears(economy, 30, 5)
+        assertTrue(
+            "too few hands lose their fields",
+            events.any { it.kind == AgeEventKind.CROP_LOST }
+        )
     }
 
     @Test
@@ -216,6 +306,21 @@ class EconomyTest {
     // --------------------------------------------------------------------- food
 
     @Test
+    fun foodCategoriesStayDistinctAndSumToTheGranary() {
+        val economy = EconomySimulation.fresh(world)
+        val site = bestLand()
+        runYears(economy, 25, 200)
+        val stores = economy.foodOf(site)
+        assertTrue("the granary is not empty on fed land", stores.isNotEmpty())
+        assertTrue("only real kinds of food are kept", stores.keys.all { it in FoodKind.entries.toSet() })
+        assertEquals(
+            "the broad stores are the granary",
+            stores.values.sum(),
+            economy.reserveOf(site)
+        )
+    }
+
+    @Test
     fun reservesPersistThroughTheSave() {
         val economy = EconomySimulation.fresh(world)
         val site = bestLand()
@@ -223,9 +328,13 @@ class EconomyTest {
         val restored = EconomySimulation.fresh(world)
         restored.applyEncoded(economy.encode())
         assertEquals(economy.reserveOf(site), restored.reserveOf(site))
+        assertEquals(economy.foodOf(site), restored.foodOf(site))
+        assertEquals(economy.cropStockOf(site), restored.cropStockOf(site))
         assertEquals(economy.cropsOf(site), restored.cropsOf(site))
         assertEquals(economy.routesOf(site), restored.routesOf(site))
         assertEquals(economy.timberOf(site), restored.timberOf(site))
+        assertEquals(economy.logsOf(site), restored.logsOf(site))
+        assertEquals(economy.materialStockOf(site), restored.materialStockOf(site))
     }
 
     @Test
@@ -276,7 +385,7 @@ class EconomyTest {
         )
     }
 
-    // ------------------------------------------------------- timber and digging
+    // --------------------------------------------------- timber, stone and salt
 
     @Test
     fun timberRegrowsUnderAFairHand() {
@@ -308,6 +417,68 @@ class EconomyTest {
     }
 
     @Test
+    fun theForestBecomesYardStockAndLumber() {
+        val economy = EconomySimulation.fresh(world)
+        val site = woodiestLand()
+        runYears(economy, 15, 300)
+        assertTrue(
+            "the axes actually bite",
+            (economy.productionOf(site)[ResourceKind.TIMBER] ?: 0) > 0
+        )
+        assertTrue("the cut wood stands in the yard as stock", economy.logsOf(site) > 0)
+        assertTrue(
+            "a working settlement squares logs into lumber",
+            (economy.materialStockOf(site)[Material.ASHWOOD] ?: 0) > 0
+        )
+    }
+
+    @Test
+    fun quarriesOpenCloseAndLeaveHistory() {
+        val economy = EconomySimulation.fresh(world)
+        val site = sites.first()
+        // a crafted save: a fresh seam of stone in the ground
+        economy.applyEncoded(craftedEntry(site.id, mapOf(15 to "500:0:0:0")))
+        val first = runYears(economy, 3, 200)
+        assertTrue("the quarry is worked", (economy.productionOf(site)[ResourceKind.STONE] ?: 0) > 0)
+        assertTrue("quarried stone stands in the yard", economy.stockOf(site, ResourceKind.STONE) > 0)
+        assertTrue(
+            "the chronicle remembers the quarry opening",
+            first.any { it.kind == AgeEventKind.QUARRY_OPENED && it.siteId == site.id }
+        )
+        runYears(economy, 60, 2000)
+        assertTrue("no seam is bottomless", economy.productionOf(site)[ResourceKind.STONE] == null)
+        assertEquals(
+            "the seam itself is gone",
+            0,
+            readerStoneSeamLeft(economy, site)
+        )
+    }
+
+    /** Reads a place's remaining stone seam back out of its own save. */
+    private fun readerStoneSeamLeft(economy: EconomySimulation, site: Site): Int {
+        val entry = economy.encode().split("\u001E").firstOrNull { it.startsWith("S${site.id}=") } ?: return -1
+        val seams = entry.split("=").getOrNull(15) ?: return -1
+        return seams.split(":").firstOrNull()?.toIntOrNull() ?: -1
+    }
+
+    @Test
+    fun saltPansFeedPreservationAndLeaveStock() {
+        val economy = EconomySimulation.fresh(world)
+        val site = sites.first()
+        // a crafted save: salt in the ground by the shore
+        economy.applyEncoded(craftedEntry(site.id, mapOf(15 to "0:500:0:0")))
+        val events = runYears(economy, 5, 100)
+        assertTrue("the pans are scraped", (economy.productionOf(site)[ResourceKind.SALT] ?: 0) > 0)
+        assertTrue("salt keeps in the store", economy.stockOf(site, ResourceKind.SALT) > 0)
+        assertTrue(
+            "the chronicle remembers the salt works",
+            events.any { it.kind == AgeEventKind.MINE_OPENED && it.siteId == site.id }
+        )
+    }
+
+    // ------------------------------------------------------- the diggings
+
+    @Test
     fun depositsAreFoundWorkedAndWorkedOut() {
         val economy = EconomySimulation.fresh(world)
         val site = siteWithDeposits()
@@ -321,6 +492,54 @@ class EconomyTest {
         val workedOut = economy.depositsOf(theSite)
         assertTrue("no pit is bottomless", workedOut.all { it.remaining == 0 })
         assertTrue("richness was once there", richness.all { it.value >= 400 })
+    }
+
+    @Test
+    fun aMineIsOpenedWhenOreFirstFlows() {
+        val economy = EconomySimulation.fresh(world)
+        val site = siteWithDeposits()!!
+        val events = runYears(economy, 40, 2000)
+        assertTrue(
+            "the chronicle remembers the mine opening",
+            events.any { it.kind == AgeEventKind.MINE_OPENED && it.siteId == site.id }
+        )
+        assertTrue("dug ore waits in the store", economy.oreStockOf(site).isNotEmpty())
+    }
+
+    @Test
+    fun oreBecomesMetalOnlyWhereTheForgeStands() {
+        val economy = EconomySimulation.fresh(world)
+        val site = siteWithDeposits()!!
+        val material = reader.depositsOf(site).first().material
+        // a hamlet digs ore but cannot smelt it
+        runYears(economy, 30, 100)
+        assertTrue(
+            "no forge, no metal: ore waits",
+            economy.materialStockOf(site)[material] == null
+        )
+        // a town smelts what its pits bring up
+        runYears(economy, 10, 600)
+        assertTrue(
+            "a town's forge turns ore into metal",
+            (economy.materialStockOf(site)[material] ?: 0) > 0
+        )
+    }
+
+    @Test
+    fun steelNeedsTheGreatForge() {
+        val economy = EconomySimulation.fresh(world)
+        val site = sites.first()
+        // a crafted save: a store of iron ore and a full granary
+        economy.applyEncoded(
+            craftedEntry(site.id, mapOf(12 to "GRAIN:20000", 16 to "IRON:500"))
+        )
+        runYears(economy, 3, 1000)
+        val stock = economy.materialStockOf(site)
+        assertTrue("the forge makes iron of the ore", (stock[Material.IRON] ?: 0) > 0)
+        assertTrue(
+            "only the great forge makes steel",
+            (stock[Material.STEEL] ?: 0) > 0
+        )
     }
 
     @Test
@@ -339,6 +558,45 @@ class EconomyTest {
     }
 
     // ---------------------------------------------------------------- materials
+
+    @Test
+    fun anUndiscoveredDepositIsNotLocal() {
+        val economy = EconomySimulation.fresh(world)
+        val site = siteWithDeposits()!!
+        val material = reader.depositsOf(site).first().material
+        val ledger = SettlementLedger.fresh(world)
+        assertEquals(
+            "veins no one has found put iron in no one's hands",
+            MaterialSource.SCARCE,
+            economy.provenanceOf(site, ledger, world.sites, material).source
+        )
+    }
+
+    @Test
+    fun anImportRequiresAnActualRoad() {
+        val (a, b) = nearestPair()
+        val others = sites.filter { it.id != a.id && it.id != b.id }
+        assertTrue("the province has a third place", others.isNotEmpty())
+        val c = others.first()
+        val economy = EconomySimulation.fresh(world)
+        // a crafted save: A holds worked iron; a road carries iron to B; C has neither
+        val roadKey = "${minOf(a.id, b.id)}>${maxOf(a.id, b.id)}:IRON@0@0@0@0"
+        economy.applyEncoded(
+            listOf(
+                craftedEntry(a.id, mapOf(17 to "IRON:100")),
+                craftedEntry(b.id, mapOf(9 to roadKey))
+            ).joinToString("\u001E")
+        )
+        val ledger = SettlementLedger.fresh(world)
+        val imported = economy.provenanceOf(b, ledger, world.sites, Material.IRON)
+        assertEquals("the road makes the material", MaterialSource.IMPORTED, imported.source)
+        assertEquals("the import names its road's other end", a.id, imported.fromSiteId)
+        assertEquals(
+            "no road, no iron: the place goes without",
+            MaterialSource.SCARCE,
+            economy.provenanceOf(c, ledger, world.sites, Material.IRON).source
+        )
+    }
 
     @Test
     fun materialsComeFromTheLandTheRoadOrNowhere() {
@@ -373,7 +631,8 @@ class EconomyTest {
         }
         assertTrue("someplace works something with its own hands", sawLocal)
         assertTrue("someplace cannot reach something", sawScarce)
-        if (sites.any { economy.routesOf(it).isNotEmpty() }) {
+        val materialRoads = sites.any { s -> economy.routesOf(s).any { it.material != null } }
+        if (materialRoads) {
             assertTrue("roads bring what the ground does not", sawImported)
         }
     }
@@ -381,26 +640,23 @@ class EconomyTest {
     // -------------------------------------------------------------------- trade
 
     @Test
-    fun tradeRoadsFormWhereTheLandComplements() {
+    fun tradeRoadsFollowSurplusAndDemand() {
         val economy = EconomySimulation.fresh(world)
         val ledger = SettlementLedger.fresh(world)
         runYears(economy, 30, 400, ledger)
         val allRoutes = sites.flatMap { economy.routesOf(it) }.distinctBy { it.key }
-        assertTrue("complementary ground finds a road", allRoutes.isNotEmpty())
+        assertTrue("a real surplus and a real want find a road", allRoutes.isNotEmpty())
         allRoutes.forEach { route ->
             val a = world.sites.first { it.id == route.fromId }
             val b = world.sites.first { it.id == route.toId }
             val dx = a.x - b.x
             val dy = a.y - b.y
             assertTrue("roads are short", dx * dx + dy * dy <= EconomySimulation.TRADE_MAX_DIST_SQ)
-            if (route.resource != ResourceKind.ORE) {
-                assertTrue(
-                    "${route.resource.label} must be rich at one end and poor at the other",
-                    reader.potentialOf(a)[route.resource] >= EconomySimulation.TRADE_RICH &&
-                        reader.potentialOf(b)[route.resource] <= EconomySimulation.TRADE_POOR
-                )
-            }
         }
+        assertTrue(
+            "roads carry actual cargo, not good intentions",
+            allRoutes.any { it.lastQty > 0 }
+        )
         // and the roads ride the save
         val withRoads = sites.first { economy.routesOf(it).isNotEmpty() }
         val restored = EconomySimulation.fresh(world)
@@ -429,6 +685,27 @@ class EconomyTest {
         )
     }
 
+    @Test
+    fun aRoadDriesUpWhenNeitherEndHasCause() {
+        val (a, b) = nearestPair()
+        val economy = EconomySimulation.fresh(world)
+        // a crafted save: a road built for salt, though no place here has any
+        val roadKey = "${minOf(a.id, b.id)}>${maxOf(a.id, b.id)}:SALT@0@0@0@0"
+        economy.applyEncoded(
+            craftedEntry(a.id, mapOf(9 to roadKey)) + "\u001E" +
+                craftedEntry(b.id, mapOf(9 to roadKey))
+        )
+        val events = runYears(economy, 5, 100)
+        assertTrue(
+            "a road with no cargo is forgotten",
+            economy.routesOf(a).none { it.cargo == "SALT" }
+        )
+        assertTrue(
+            "the chronicle remembers the road that dried",
+            events.any { it.kind == AgeEventKind.TRADE_ROUTE_CLOSED && it.text.contains(a.name) }
+        )
+    }
+
     // ------------------------------------------------------------ specialization
 
     @Test
@@ -443,6 +720,41 @@ class EconomyTest {
         val labels = economy.specializationOf(site, 300)
         assertTrue(labels.isNotEmpty())
         assertEquals("an identity is derived, not rolled", labels, economy.specializationOf(site, 300))
+    }
+
+    @Test
+    fun specializationFollowsTheWorkNotTheGround() {
+        val economy = EconomySimulation.fresh(world)
+        val site = siteWithDeposits() ?: sites.first()
+        // no folk, no work, no identity — whatever the ground could give
+        assertTrue(
+            "potential without people is no identity at all",
+            economy.specializationOf(site, 0).isEmpty()
+        )
+        // a mining ground with no mine yet is not a mining town
+        val labels = economy.specializationOf(site, 300)
+        assertFalse(
+            "ore still in the ground makes no miner",
+            labels.contains("mining")
+        )
+    }
+
+    @Test
+    fun anExhaustedMineEndsTheMiningTown() {
+        val economy = EconomySimulation.fresh(world)
+        val site = siteWithDeposits() ?: return
+        val events = runYears(economy, 80, 2000)
+        assertTrue(
+            "the pits were worked dry",
+            events.any {
+                it.kind == AgeEventKind.RESOURCE_DEPLETED &&
+                    it.siteId == site.id && it.text.contains("diggings")
+            }
+        )
+        assertFalse(
+            "no ore, no miners: the identity goes with the mine",
+            economy.specializationOf(site, 2000).contains("mining")
+        )
     }
 
     // -------------------------------------------------------------- the long run
@@ -477,9 +789,15 @@ class EconomyTest {
         val reloaded = simReloaded.economy
         sites.forEach { site ->
             assertEquals(midRun.cropsOf(site), reloaded.cropsOf(site))
+            assertEquals(midRun.cropStockOf(site), reloaded.cropStockOf(site))
+            assertEquals(midRun.foodOf(site), reloaded.foodOf(site))
             assertEquals(midRun.depositsOf(site), reloaded.depositsOf(site))
+            assertEquals(midRun.oreStockOf(site), reloaded.oreStockOf(site))
+            assertEquals(midRun.materialStockOf(site), reloaded.materialStockOf(site))
             assertEquals(midRun.routesOf(site), reloaded.routesOf(site))
             assertEquals(midRun.reserveOf(site), reloaded.reserveOf(site))
+            assertEquals(midRun.timberOf(site), reloaded.timberOf(site))
+            assertEquals(midRun.logsOf(site), reloaded.logsOf(site))
         }
     }
 
@@ -495,9 +813,13 @@ class EconomyTest {
         }
         val economyKinds = setOf(
             AgeEventKind.RESOURCE_DISCOVERED, AgeEventKind.RESOURCE_DEPLETED,
+            AgeEventKind.MINE_OPENED, AgeEventKind.QUARRY_OPENED, AgeEventKind.QUARRY_CLOSED,
+            AgeEventKind.INDUSTRY_ESTABLISHED, AgeEventKind.INDUSTRY_DECLINED,
+            AgeEventKind.CROP_ESTABLISHED, AgeEventKind.CROP_LOST,
             AgeEventKind.HARVEST_FAILURE, AgeEventKind.HARVEST_SURPLUS,
             AgeEventKind.TRADE_ROUTE_OPENED, AgeEventKind.TRADE_ROUTE_CLOSED,
-            AgeEventKind.SPECIALIZED
+            AgeEventKind.TRADE_ROUTE_STRENGTHENED, AgeEventKind.SPECIALIZED,
+            AgeEventKind.ECONOMIC_DECLINE
         )
         sim.eventLog().filter { it.kind in economyKinds }.forEach { event ->
             val chronicle = event.toChronicle()
