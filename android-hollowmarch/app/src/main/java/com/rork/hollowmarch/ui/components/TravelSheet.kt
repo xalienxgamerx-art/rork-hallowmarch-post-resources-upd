@@ -135,6 +135,14 @@ private fun pinToRow(bearing: Bearing) {
                 color = Ink.Faded,
                 fontSize = 10.sp
             )
+            if (bearing.roads.isNotBlank()) {
+                MonoText(
+                    bearing.roads,
+                    color = Ink.Brass.copy(alpha = 0.65f),
+                    fontSize = 10.sp,
+                    modifier = Modifier.padding(top = 2.dp)
+                )
+            }
         }
         Column(horizontalAlignment = Alignment.End) {
             MonoText(

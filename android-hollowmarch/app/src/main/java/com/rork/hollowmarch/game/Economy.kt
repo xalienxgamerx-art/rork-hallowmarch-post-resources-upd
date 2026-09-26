@@ -310,6 +310,19 @@ data class MaterialProvenance(
     val fromSiteName: String = ""
 )
 
+/** What the roads actually carry for one place, and which way the wagons run. */
+data class TradeFlow(val cargo: String, val partnerId: Int, val incoming: Boolean)
+
+/** What remains in the ground at one place: seams of stone and salt, the bed of clay. */
+data class Seams(val stone: Int, val salt: Int, val clay: Int)
+
+/** The granary's own ledger: stores by kind, the year's work, the folk's need. */
+data class FoodLedger(
+    val stores: Map<FoodKind, Int>,
+    val production: Map<FoodKind, Int>,
+    val consumption: Int
+)
+
 // ------------------------------------------------------------- the simulation
 
 /**
@@ -493,6 +506,75 @@ class EconomySimulation private constructor(private val world: World) {
         stateOf(site).routes.entries.mapNotNull { (key, r) ->
             parseRoute(key)?.let { TradeRoute(it.fromId, it.toId, r.cargo, r.since, r.strength, r.lastQty) }
         }.sortedBy { it.key }
+
+    /** Last year's food work, by kind. */
+    fun foodProductionOf(site: Site): Map<FoodKind, Int> = stateOf(site).foodProduction.toMap()
+
+    /** The granary's ledger: stores by kind, the year's work, the folk's need. */
+    fun foodLedgerOf(site: Site, folk: Int): FoodLedger {
+        val st = stateOf(site)
+        return FoodLedger(st.food.toMap(), st.foodProduction.toMap(), folk * FOOD_NEED)
+    }
+
+    /** What a count of folk eats in a year: the granary's own arithmetic. */
+    fun foodNeedOf(folk: Int): Int = folk * FOOD_NEED
+
+    /** How many lean years have run against the granary lately. */
+    fun famineStreakOf(site: Site): Int = stateOf(site).famineStreak
+
+    /** Whether the last harvest still counts as a fat one. */
+    fun richYearOf(site: Site): Boolean = stateOf(site).richYear
+
+    /** The worked trades the place remembers, and those that have failed. */
+    fun industriesOf(site: Site): Set<Material> = stateOf(site).industries.toSet()
+
+    /** The trades the place remembers that no longer feed anyone. */
+    fun declinedOf(site: Site): Set<Material> = stateOf(site).declined.toSet()
+
+    /** What remains in the ground: seams of stone and salt, the bed of clay. */
+    fun seamsOf(site: Site): Seams =
+        stateOf(site).let { Seams(it.stoneSeam, it.saltSeam, it.clayBed) }
+
+    /** Whether the high ground above a place was ever quarried, and the salt pans dug. */
+    fun quarryOpenedOf(site: Site): Boolean = stateOf(site).quarryOpened
+
+    /** Whether the salt pans were ever scraped. */
+    fun saltOpenedOf(site: Site): Boolean = stateOf(site).saltOpened
+
+    /**
+     * What the roads actually carry for a place this year, and which way the
+     * wagons run — read from the same surplus and want the roads themselves
+     * obey, never guessed from potential.
+     */
+    fun tradeFlowsOf(site: Site, ledger: SettlementLedger, sites: List<Site>): List<TradeFlow> {
+        val st = stateOf(site)
+        val folk = ledger.folkOf(site).coerceAtLeast(0)
+        val flows = mutableListOf<TradeFlow>()
+        for (key in st.routes.keys) {
+            val route = parseRoute(key) ?: continue
+            val otherId = if (route.fromId == site.id) route.toId else route.fromId
+            val partner = sites.firstOrNull { it.id == otherId } ?: continue
+            val partnerState = stateOf(partner)
+            val folkPartner = ledger.folkOf(partner).coerceAtLeast(0)
+            val capacity = (folk + folkPartner) / 4 + 20
+            val outgoing = minOf(
+                surplusOf(st, route.cargo, folk),
+                demandOf(partnerState, route.cargo, folkPartner),
+                capacity
+            )
+            val incoming = minOf(
+                surplusOf(partnerState, route.cargo, folkPartner),
+                demandOf(st, route.cargo, folk),
+                capacity
+            )
+            if (outgoing >= TRADE_MIN_CARGO && outgoing >= incoming) {
+                flows += TradeFlow(route.cargo, partner.id, incoming = false)
+            } else if (incoming >= TRADE_MIN_CARGO) {
+                flows += TradeFlow(route.cargo, partner.id, incoming = true)
+            }
+        }
+        return flows.sortedWith(compareBy({ it.partnerId }, { it.cargo }))
+    }
 
     /** A place's economic identity, derived from what it actually produces. */
     fun specializationOf(site: Site, folk: Int): List<String> {

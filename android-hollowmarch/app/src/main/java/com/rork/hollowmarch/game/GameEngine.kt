@@ -42,7 +42,9 @@ data class Bearing(
     /** The living folk of a settlement, or -1 for places that keep none. */
     val folk: Int = -1,
     /** The stage the place stands at — a camp, a town, a capital. */
-    val stage: String = ""
+    val stage: String = "",
+    /** The trade roads a place you have walked keeps, and what crosses them. */
+    val roads: String = ""
 )
 
 /** Rain bends the pace of a walk: how the speed folds, and what each stride costs. */
@@ -2814,6 +2816,16 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
         // rain slows the leagues: the hours a walk asks swell with the weather
         val walkFactor = if (outdoor) rainPacing(weather.rain).first else 1f
         val settlement = site.isSettlement && !site.ruined
+        // word of the trade roads: only for places you have stood in yourself
+        val roads = if (settlement && site.id in visitedSites) {
+            val flows = history.economy.tradeFlowsOf(site, settlements, world.sites)
+            if (flows.isEmpty()) "" else
+                "roads: " + flows.take(2).joinToString(" · ") { flow ->
+                    val partner = world.sites.firstOrNull { it.id == flow.partnerId }?.name ?: "afar"
+                    val cargo = cargoWord(flow.cargo)
+                    if (flow.incoming) "$cargo from $partner" else "$cargo to $partner"
+                }
+        } else ""
         return Bearing(
             site = site,
             compass = OverlandGen.windOf(dx, dy),
@@ -2822,7 +2834,8 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
             visited = site.id in visitedSites,
             source = "",
             folk = if (settlement) folkOf(site.id) else -1,
-            stage = if (settlement) stageAt(site).label else ""
+            stage = if (settlement) stageAt(site).label else "",
+            roads = roads
         )
     }
 

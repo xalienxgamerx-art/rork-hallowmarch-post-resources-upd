@@ -43,8 +43,10 @@ import androidx.compose.ui.unit.sp
 import com.rork.hollowmarch.game.Attr
 import com.rork.hollowmarch.game.ChronicleFilter
 import com.rork.hollowmarch.game.GameEngine
+import com.rork.hollowmarch.game.SettlementEconomy
 import com.rork.hollowmarch.game.chronicleMatches
 import com.rork.hollowmarch.game.searchMatches
+import com.rork.hollowmarch.game.settlementEconomyOf
 import com.rork.hollowmarch.game.Skill
 import com.rork.hollowmarch.game.SkillGroup
 import com.rork.hollowmarch.game.WeaponCategory
@@ -561,6 +563,7 @@ private fun TownsTab(world: World, engine: GameEngine?) {
                 world,
                 site,
                 engine?.visitedSites ?: emptySet(),
+                engine,
                 folk = engine?.folkOf(site.id) ?: site.population,
                 stageLabel = engine?.stageAt(site)?.label ?: site.kind.label
             )
@@ -588,12 +591,18 @@ private fun TownRow(
     world: World,
     site: Site,
     visited: Set<Int>,
+    engine: GameEngine?,
     folk: Int,
     stageLabel: String
 ) {
     val holder = world.power(site.holderPowerId)
     val (risk, riskColor) = rebellionRisk(site)
-    Column(modifier = Modifier.padding(vertical = 10.dp)) {
+    var open by remember { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .padding(vertical = 10.dp)
+            .clickable { open = !open }
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
@@ -687,6 +696,151 @@ private fun TownRow(
                 modifier = Modifier.padding(top = 3.dp)
             )
         }
+        MonoText(
+            if (open) "— fold the census away" else "— read the economic census",
+            color = Ink.Brass.copy(alpha = 0.7f),
+            fontSize = 10.sp,
+            modifier = Modifier.padding(top = 5.dp)
+        )
+    }
+    if (open && engine != null) {
+        // built only when opened, and only from what the simulation itself holds
+        val summary = remember(site.id, folk, world.currentYear) {
+            settlementEconomyOf(site, world, engine.history.economy, engine.history, engine.settlements)
+        }
+        EconomicCensus(summary)
+    }
+}
+
+/** The settlement's economic census: what it lives on, lacks, trades, and remembers. */
+@Composable
+private fun EconomicCensus(summary: SettlementEconomy) {
+    val conditionColor = when (summary.condition) {
+        "Prosperous", "Stable" -> Ink.Verdigris
+        "Declining", "Trade dependent" -> Ink.Brass
+        else -> Ink.Blood
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp, bottom = 10.dp, start = 10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            MonoText(summary.condition, color = conditionColor, fontSize = 12.sp)
+            summary.conditionCause?.let {
+                MonoText(" — $it", color = Ink.Faded, fontSize = 11.sp, modifier = Modifier.padding(start = 6.dp))
+            }
+        }
+        CensusBlock("THE PEOPLE") {
+            MonoText(summary.censusLine, color = Ink.Faded, fontSize = 11.sp)
+        }
+        CensusBlock("ECONOMY") {
+            Text(summary.identity, color = Ink.Parchment, fontSize = 12.sp, lineHeight = 17.sp)
+        }
+        CensusBlock("FOOD") {
+            Text(summary.foodNote, color = Ink.Faded, fontSize = 11.sp, lineHeight = 16.sp)
+            summary.food.forEach {
+                CensusRow(it.label, it.plenty)
+            }
+        }
+        if (summary.seeds.isNotEmpty()) {
+            CensusBlock("SEED BARN") {
+                summary.seeds.forEach { seed ->
+                    MonoText(seed, color = Ink.Faded, fontSize = 11.sp)
+                }
+            }
+        }
+        if (summary.crops.isNotEmpty()) {
+            CensusBlock("CROPS") {
+                summary.crops.forEach { crop ->
+                    CensusRow(crop.name, listOfNotNull(crop.state, crop.barn).joinToString(" · "))
+                }
+            }
+        }
+        if (summary.resources.isNotEmpty()) {
+            CensusBlock("YARDS AND GROUND") {
+                summary.resources.forEach { CensusRow(it.name, it.state) }
+            }
+        }
+        if (summary.materials.isNotEmpty()) {
+            CensusBlock("MATERIALS") {
+                summary.materials.forEach { material ->
+                    CensusRow(
+                        material.name,
+                        listOfNotNull(material.word, material.from?.let { from -> "from $from" }).joinToString(" ")
+                    )
+                }
+            }
+        }
+        if (summary.industries.isNotEmpty()) {
+            CensusBlock("INDUSTRIES") {
+                summary.industries.forEach { CensusRow(it.name, it.status) }
+            }
+        }
+        if (summary.exports.isNotEmpty() || summary.imports.isNotEmpty()) {
+            CensusBlock("TRADE") {
+                summary.exports.forEach { MonoText("sends ${it.cargo.lowercase()} to ${it.partner}", color = Ink.Faded, fontSize = 11.sp) }
+                summary.imports.forEach { MonoText("draws ${it.cargo.lowercase()} from ${it.partner}", color = Ink.Faded, fontSize = 11.sp) }
+            }
+        }
+        if (summary.roads.isNotEmpty()) {
+            CensusBlock("ROADS") {
+                summary.roads.forEach { road ->
+                    Text(road, color = Ink.Faded, fontSize = 11.sp, lineHeight = 16.sp)
+                }
+            }
+        }
+        if (summary.works.isNotEmpty()) {
+            CensusBlock("WORKS") {
+                summary.works.forEach { work ->
+                    CensusRow(work.name, listOfNotNull(work.state, work.detail).joinToString(" · "))
+                }
+            }
+        }
+        if (summary.history.isNotEmpty()) {
+            CensusBlock("ITS STORY") {
+                summary.history.forEach { line ->
+                    Text(line, color = Ink.Parchment.copy(alpha = 0.85f), fontSize = 11.sp, lineHeight = 16.sp)
+                }
+            }
+        }
+        if (summary.milestones.isNotEmpty()) {
+            CensusBlock("YEARS") {
+                summary.milestones.forEach { milestone ->
+                    Row(modifier = Modifier.padding(top = 3.dp)) {
+                        MonoText("${milestone.year}", color = Ink.Brass, fontSize = 10.sp, modifier = Modifier.width(52.dp))
+                        Text(
+                            milestone.text,
+                            color = Ink.Faded,
+                            fontSize = 11.sp,
+                            lineHeight = 15.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CensusBlock(label: String, content: @Composable () -> Unit) {
+    Column(modifier = Modifier.padding(top = 9.dp)) {
+        MonoText(label, color = Ink.Brass.copy(alpha = 0.8f), fontSize = 10.sp)
+        Spacer(Modifier.height(3.dp))
+        content()
+    }
+}
+
+@Composable
+private fun CensusRow(name: String, detail: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 2.dp)
+    ) {
+        Text(name, color = Ink.Parchment, fontSize = 11.sp, modifier = Modifier.weight(0.42f))
+        Text(detail, color = Ink.Faded, fontSize = 11.sp, lineHeight = 15.sp, modifier = Modifier.weight(0.58f))
     }
 }
 
