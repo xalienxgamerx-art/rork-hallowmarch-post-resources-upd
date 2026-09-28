@@ -260,7 +260,7 @@ class SettlementSystem(private val engine: GameEngine, private val rng: Random) 
         patrolTimer -= dt
         if (patrolTimer > 0f) return
         patrolTimer = 25f + rng.nextFloat() * 35f
-        val here = engine.world.sites.firstOrNull { it.id == engine.currentSiteId } ?: return
+        val here = engine.world.siteOrNull(engine.currentSiteId) ?: return
         val hunters = engine.world.powers.filter { power ->
             engine.reputation.standingFor(power.id) <= -60 && engine.world.sites.any { site ->
                 site.holderPowerId == power.id && site.isSettlement &&

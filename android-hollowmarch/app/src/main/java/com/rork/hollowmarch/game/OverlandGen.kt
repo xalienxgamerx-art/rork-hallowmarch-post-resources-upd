@@ -4,6 +4,7 @@ import com.rork.hollowmarch.world.Biome
 import com.rork.hollowmarch.world.Site
 import com.rork.hollowmarch.world.SiteKind
 import com.rork.hollowmarch.world.TerrainMap
+import com.rork.hollowmarch.world.WORLD_LEAGUES
 import com.rork.hollowmarch.world.World
 import com.rork.hollowmarch.world.isSettlement
 import kotlin.math.abs
@@ -23,8 +24,8 @@ object OverlandGen {
     /** Cells across the province. One cell is a few hundred paces. */
     const val SIZE = 320
 
-    /** The province spans 42 leagues corner to corner, as the chronicle counts. */
-    const val LEAGUES_PER_CELL = 42f / (SIZE - 1)
+    /** The province spans Daggerfall's recorded land: about 84 leagues to a side. */
+    const val LEAGUES_PER_CELL = WORLD_LEAGUES / (SIZE - 1)
 
     /** The floor number that means the open ground itself. */
     const val OVERLAND_FLOOR = -1
@@ -159,147 +160,22 @@ object OverlandGen {
             }
         }
 
-        // Every place stands on the land as a landmark with its door and its yard.
-        world.sites.forEach { site ->
-            // The living places are drawn to their stage: yard, walls and gate at scale.
-            if (site.isSettlement) {
-                drawLandmark(map, site, stageOf(site, site.population))
-                return@forEach
-            }
-            val lx = landmarkX(site)
-            val ly = landmarkY(site)
-            val cx = lx + 0.5f
-            val cy = ly + 0.5f
-            // the yard: open ground and a trodden heart
-            for (dy in -5..5) for (dx in -5..5) {
-                val x = lx + dx
-                val y = ly + dy
-                if (x !in 1 until size - 1 || y !in 1 until size - 1) continue
-                val d2 = dx * dx + dy * dy
-                if (d2 <= 25) {
-                    val idx = y * size + x
-                    map.walls[idx] = 0
-                    if (d2 <= 8) map.floorTex[idx] = Textures.FLOOR_ROAD
-                }
-            }
-            when (site.kind) {
-                SiteKind.VAULT -> {
-                    map.entities += Entity(
-                        x = cx, y = cy, spriteId = Sprites.HILLDOOR,
-                        kind = EntityKind.PROP, height = 1.7f, name = "the sealed door"
-                    )
-                    map.entities += Entity(
-                        x = cx - 2.2f, y = cy + 1.4f, spriteId = Sprites.STANDING_STONE,
-                        kind = EntityKind.PROP, height = 1.5f, name = "ward-stone"
-                    )
-                    map.entities += Entity(
-                        x = cx + 2.2f, y = cy + 1.4f, spriteId = Sprites.STANDING_STONE,
-                        kind = EntityKind.PROP, height = 1.5f, name = "ward-stone"
-                    )
-                    map.portals += Portal(
-                        x = cx, y = cy, label = "the sealed door",
-                        prompt = "Enter ${site.name}", targetFloor = 0,
-                        arrivalIndex = 0, down = true, targetSiteId = site.id
-                    )
-                }
-                SiteKind.BARROW -> {
-                    map.entities += Entity(
-                        x = cx, y = cy, spriteId = Sprites.CAIRN,
-                        kind = EntityKind.PROP, height = 1.4f, name = "cairn"
-                    )
-                    map.entities += Entity(
-                        x = cx - 2.0f, y = cy + 1.8f, spriteId = Sprites.GRAVE,
-                        kind = EntityKind.PROP, height = 0.6f, name = "grave"
-                    )
-                    map.entities += Entity(
-                        x = cx + 2.0f, y = cy + 1.2f, spriteId = Sprites.GRAVE,
-                        kind = EntityKind.PROP, height = 0.6f, name = "grave"
-                    )
-                    map.portals += Portal(
-                        x = cx, y = cy, label = "the barrow-mouth",
-                        prompt = "Enter ${site.name}", targetFloor = 0,
-                        arrivalIndex = 0, down = true, targetSiteId = site.id
-                    )
-                }
-                SiteKind.RUIN -> {
-                    // broken ribs of whatever the place was
-                    for (i in 0 until 5) {
-                        val ang = i * 1.9f
-                        val px = (lx + cos(ang) * 3f).roundToInt().coerceIn(1, size - 2)
-                        val py = (ly + sin(ang) * 3f).roundToInt().coerceIn(1, size - 2)
-                        map.walls[py * size + px] = Textures.WALL_RUIN
-                    }
-                    map.entities += Entity(
-                        x = cx, y = cy, spriteId = Sprites.STANDING_STONE,
-                        kind = EntityKind.PROP, height = 1.4f, name = "fallen keeper"
-                    )
-                    map.portals += Portal(
-                        x = cx, y = cy + 0.5f, label = "the fallen walls",
-                        prompt = "Enter ${site.name}", targetFloor = 0,
-                        arrivalIndex = 0, down = true, targetSiteId = site.id
-                    )
-                }
-                SiteKind.CAMP -> {
-                    map.entities += Entity(
-                        x = cx, y = cy - 1.2f, spriteId = Sprites.WATCHFIRE,
-                        kind = EntityKind.PROP, height = 1.0f, name = "watchfire"
-                    )
-                    map.entities += Entity(
-                        x = cx - 2.2f, y = cy + 1.2f, spriteId = Sprites.TENT,
-                        kind = EntityKind.PROP, height = 1.2f, name = "tent"
-                    )
-                    map.entities += Entity(
-                        x = cx + 2.2f, y = cy + 1.2f, spriteId = Sprites.TENT,
-                        kind = EntityKind.PROP, height = 1.2f, name = "tent"
-                    )
-                    map.portals += Portal(
-                        x = cx, y = cy + 0.5f, label = "the watchfire",
-                        prompt = "Enter ${site.name}", targetFloor = 0,
-                        arrivalIndex = 0, down = false, targetSiteId = site.id
-                    )
-                }
-                else -> {
-                    // the shrine: a ring of stones around its door
-                    repeat(8) { i ->
-                        val ang = i * 6.28318f / 8
-                        map.entities += Entity(
-                            x = cx + cos(ang) * 3.2f, y = cy + sin(ang) * 3.2f,
-                            spriteId = Sprites.STANDING_STONE,
-                            kind = EntityKind.PROP, height = 1.5f, name = "standing stone"
-                        )
-                    }
-                    map.portals += Portal(
-                        x = cx, y = cy, label = "the stone circle",
-                        prompt = "Enter ${site.name}", targetFloor = 0,
-                        arrivalIndex = 0, down = false, targetSiteId = site.id
-                    )
-                }
-            }
+        // The kingdoms lay claim to the open ground before anything stands on it:
+        // each realm's seat tints the country it holds, and the marches are stoned.
+        realmOwnership(map, world)
 
-            // where walking out puts you: open ground south of the landmark
-            var spot: Pair<Float, Float>? = null
-            for (dy in 7..16) {
-                val y = ly + dy
-                if (y >= size - 2) break
-                if (map.walls[y * size + lx] == 0 && map.walls[(y + 1) * size + lx] == 0) {
-                    spot = Pair(cx, y + 0.5f)
-                    break
-                }
+        // The great places stand drawn, with their doors and their yards. The lesser
+        // places wait in the pending rolls: a continent of villages cannot be drawn
+        // whole — each is stamped onto the ground as the walker comes near it.
+        world.sites.forEach { site ->
+            val great = site.isSettlement &&
+                stageOf(site, site.population).ordinal >= SettlementStage.TOWN.ordinal
+            if (great || site.kind == SiteKind.VAULT || site.kind == SiteKind.BARROW) {
+                stampLandmark(map, site)
+            } else {
+                val key = pendingKey(landmarkX(site), landmarkY(site))
+                map.pendingLandmarks.getOrPut(key) { mutableListOf() }.add(site)
             }
-            val entry = spot ?: Pair(cx, (ly + 8).toFloat())
-            // a trodden path from the yard to the standing spot
-            val entryCell = entry.second.toInt() - ly
-            for (dy in 5..entryCell) {
-                val y = ly + dy
-                if (y !in 1 until size - 1) continue
-                for (dx in -1..1) {
-                    val idx = y * size + lx + dx
-                    if (map.walls[idx] == Textures.WALL_STONE) continue
-                    map.walls[idx] = 0
-                }
-            }
-            map.walls[entry.second.toInt() * size + lx] = 0
-            map.entrySpots[site.id] = entry
         }
 
         // every door stands open, whatever was built beside it
@@ -348,6 +224,251 @@ object OverlandGen {
         map.spawnY = vaultEntry.second
         map.spawnAngle = -1.5708f
         return map
+    }
+
+    /** The pending-landmark bucket for a map cell: ten cells to a bucket. */
+    fun pendingKey(cx: Int, cy: Int): Long = (cx / 10).toLong() * 4096L + (cy / 10)
+
+    /** The ground under a fresh landmark is levelled, so the masonry sits true. */
+    private fun flattenPad(map: GameMap, lx: Int, ly: Int) {
+        val hts = map.heights ?: return
+        val vw = map.width + 1
+        val h0 = map.heightAt(lx + 0.5f, ly + 0.5f)
+        for (dy in -6..6) for (dx in -6..6) {
+            val vx = lx + dx
+            val vy = ly + dy
+            if (vx !in 0..map.width || vy !in 0..map.height) continue
+            hts[vy * vw + vx] = h0
+        }
+    }
+
+    /**
+     * One place stamped onto the open ground: living places drawn to their stage,
+     * wild places to their yard. The lesser places are stamped as the walker comes
+     * near them, so a continent builds cheap and walks rich.
+     */
+    fun stampLandmark(map: GameMap, site: Site) {
+        if (!map.stampedSites.add(site.id)) return
+        // The living places are drawn to their stage: yard, walls and gate at scale.
+        if (site.isSettlement) {
+            drawLandmark(map, site, stageOf(site, site.population))
+            flattenPad(map, landmarkX(site), landmarkY(site))
+            return
+        }
+        val size = map.width
+        val lx = landmarkX(site)
+        val ly = landmarkY(site)
+        val cx = lx + 0.5f
+        val cy = ly + 0.5f
+        // the yard: open ground and a trodden heart
+        val r = 3
+        for (dy in -r..r) for (dx in -r..r) {
+            val x = lx + dx
+            val y = ly + dy
+            if (x !in 1 until size - 1 || y !in 1 until size - 1) continue
+            val d2 = dx * dx + dy * dy
+            if (d2 <= r * r) {
+                map.walls[y * size + x] = 0
+                if (d2 <= 2) map.floorTex[y * size + x] = Textures.FLOOR_ROAD
+            }
+        }
+        when (site.kind) {
+            SiteKind.VAULT -> {
+                map.entities += Entity(
+                    x = cx, y = cy, spriteId = Sprites.HILLDOOR,
+                    kind = EntityKind.PROP, height = 1.7f, name = "the sealed door"
+                )
+                map.entities += Entity(
+                    x = cx - 2.2f, y = cy + 1.4f, spriteId = Sprites.STANDING_STONE,
+                    kind = EntityKind.PROP, height = 1.5f, name = "ward-stone"
+                )
+                map.entities += Entity(
+                    x = cx + 2.2f, y = cy + 1.4f, spriteId = Sprites.STANDING_STONE,
+                    kind = EntityKind.PROP, height = 1.5f, name = "ward-stone"
+                )
+                map.portals += Portal(
+                    x = cx, y = cy, label = "the sealed door",
+                    prompt = "Enter ${site.name}", targetFloor = 0,
+                    arrivalIndex = 0, down = true, targetSiteId = site.id
+                )
+            }
+            SiteKind.BARROW -> {
+                map.entities += Entity(
+                    x = cx, y = cy, spriteId = Sprites.CAIRN,
+                    kind = EntityKind.PROP, height = 1.4f, name = "cairn"
+                )
+                map.entities += Entity(
+                    x = cx - 2.0f, y = cy + 1.8f, spriteId = Sprites.GRAVE,
+                    kind = EntityKind.PROP, height = 0.6f, name = "grave"
+                )
+                map.entities += Entity(
+                    x = cx + 2.0f, y = cy + 1.2f, spriteId = Sprites.GRAVE,
+                    kind = EntityKind.PROP, height = 0.6f, name = "grave"
+                )
+                map.portals += Portal(
+                    x = cx, y = cy, label = "the barrow-mouth",
+                    prompt = "Enter ${site.name}", targetFloor = 0,
+                    arrivalIndex = 0, down = true, targetSiteId = site.id
+                )
+            }
+            SiteKind.RUIN -> {
+                // broken ribs of whatever the place was
+                for (i in 0 until 5) {
+                    val ang = i * 1.9f
+                    val px = (lx + cos(ang) * 3f).roundToInt().coerceIn(1, size - 2)
+                    val py = (ly + sin(ang) * 3f).roundToInt().coerceIn(1, size - 2)
+                    map.walls[py * size + px] = Textures.WALL_RUIN
+                }
+                map.entities += Entity(
+                    x = cx, y = cy, spriteId = Sprites.STANDING_STONE,
+                    kind = EntityKind.PROP, height = 1.4f, name = "fallen keeper"
+                )
+                map.portals += Portal(
+                    x = cx, y = cy + 0.5f, label = "the fallen walls",
+                    prompt = "Enter ${site.name}", targetFloor = 0,
+                    arrivalIndex = 0, down = true, targetSiteId = site.id
+                )
+            }
+            SiteKind.CAMP -> {
+                map.entities += Entity(
+                    x = cx, y = cy - 1.2f, spriteId = Sprites.WATCHFIRE,
+                    kind = EntityKind.PROP, height = 1.0f, name = "watchfire"
+                )
+                map.entities += Entity(
+                    x = cx - 2.2f, y = cy + 1.2f, spriteId = Sprites.TENT,
+                    kind = EntityKind.PROP, height = 1.2f, name = "tent"
+                )
+                map.entities += Entity(
+                    x = cx + 2.2f, y = cy + 1.2f, spriteId = Sprites.TENT,
+                    kind = EntityKind.PROP, height = 1.2f, name = "tent"
+                )
+                map.portals += Portal(
+                    x = cx, y = cy + 0.5f, label = "the watchfire",
+                    prompt = "Enter ${site.name}", targetFloor = 0,
+                    arrivalIndex = 0, down = false, targetSiteId = site.id
+                )
+            }
+            else -> {
+                // the shrine: a ring of stones around its door
+                repeat(8) { i ->
+                    val ang = i * 6.28318f / 8
+                    map.entities += Entity(
+                        x = cx + cos(ang) * 3.2f, y = cy + sin(ang) * 3.2f,
+                        spriteId = Sprites.STANDING_STONE,
+                        kind = EntityKind.PROP, height = 1.5f, name = "standing stone"
+                    )
+                }
+                map.portals += Portal(
+                    x = cx, y = cy, label = "the stone circle",
+                    prompt = "Enter ${site.name}", targetFloor = 0,
+                    arrivalIndex = 0, down = false, targetSiteId = site.id
+                )
+            }
+        }
+
+        // where walking out puts you: open ground south of the landmark
+        var spot: Pair<Float, Float>? = null
+        for (dy in 5..14) {
+            val y = ly + dy
+            if (y >= size - 2) break
+            if (map.walls[y * size + lx] == 0 && map.walls[(y + 1) * size + lx] == 0) {
+                spot = Pair(cx, y + 0.5f)
+                break
+            }
+        }
+        val entry = spot ?: Pair(cx, (ly + 6).toFloat())
+        // a trodden path from the yard to the standing spot
+        val entryCell = entry.second.toInt() - ly
+        for (dy in 3..entryCell) {
+            val y = ly + dy
+            if (y !in 1 until size - 1) continue
+            for (dx in -1..1) {
+                val idx = y * size + lx + dx
+                if (map.walls[idx] == Textures.WALL_STONE) continue
+                map.walls[idx] = 0
+            }
+        }
+        map.walls[entry.second.toInt() * size + lx] = 0
+        map.entrySpots[site.id] = entry
+        flattenPad(map, lx, ly)
+    }
+
+    /**
+     * The kingdoms laid on the open ground: every living realm's seat claims the
+     * country around it, cell by cell, to the contested middle. The ground wears
+     * its realm's tint, and the marches are marked with standing stones.
+     */
+    private fun realmOwnership(map: GameMap, world: World) {
+        val size = map.width
+        val seats = world.powers.filter { !it.extinct }.mapNotNull { p ->
+            p.capitalSiteId?.let { id -> world.siteOrNull(id) }
+                ?.takeIf { !it.ruined && it.isSettlement }
+        }
+        if (seats.isEmpty()) return
+        val owner = IntArray(size * size) { -1 }
+        val queue = IntArray(size * size)
+        var head = 0
+        var tail = 0
+        seats.forEachIndexed { realm, seat ->
+            val sx = landmarkX(seat)
+            val sy = landmarkY(seat)
+            for (dy in -1..1) for (dx in -1..1) {
+                val x = sx + dx
+                val y = sy + dy
+                if (x !in 0 until size || y !in 0 until size) continue
+                val idx = y * size + x
+                if (owner[idx] == -1 && map.walls[idx] == 0) {
+                    owner[idx] = realm
+                    queue[tail++] = idx
+                }
+            }
+        }
+        while (head < tail) {
+            val idx = queue[head++]
+            val x = idx % size
+            val y = idx / size
+            val realm = owner[idx]
+            if (x + 1 < size) {
+                val n = idx + 1
+                if (owner[n] == -1 && map.walls[n] == 0) { owner[n] = realm; queue[tail++] = n }
+            }
+            if (x > 0) {
+                val n = idx - 1
+                if (owner[n] == -1 && map.walls[n] == 0) { owner[n] = realm; queue[tail++] = n }
+            }
+            if (y + 1 < size) {
+                val n = idx + size
+                if (owner[n] == -1 && map.walls[n] == 0) { owner[n] = realm; queue[tail++] = n }
+            }
+            if (y > 0) {
+                val n = idx - size
+                if (owner[n] == -1 && map.walls[n] == 0) { owner[n] = realm; queue[tail++] = n }
+            }
+        }
+        // the tint of the ground, and the stones of the marches
+        val tints = Textures.REALM_FLOORS
+        for (y in 0 until size) {
+            for (x in 0 until size) {
+                val idx = y * size + x
+                val realm = owner[idx]
+                if (realm < 0) continue
+                if (map.floorTex[idx] == Textures.FLOOR_GRASS) {
+                    map.floorTex[idx] = tints[realm % tints.size]
+                }
+                if ((x + y) % 9 != 0 || map.walls[idx] != 0) continue
+                val march =
+                    (x + 1 < size && owner[idx + 1] >= 0 && owner[idx + 1] != realm) ||
+                        (x > 0 && owner[idx - 1] >= 0 && owner[idx - 1] != realm) ||
+                        (y + 1 < size && owner[idx + size] >= 0 && owner[idx + size] != realm) ||
+                        (y > 0 && owner[idx - size] >= 0 && owner[idx - size] != realm)
+                if (march) {
+                    map.entities += Entity(
+                        x = x + 0.5f, y = y + 0.5f, spriteId = Sprites.CAIRN,
+                        kind = EntityKind.PROP, height = 1.1f, name = "march stone"
+                    )
+                }
+            }
+        }
     }
 
     /** Every cell reachable on foot from a standing spot. */

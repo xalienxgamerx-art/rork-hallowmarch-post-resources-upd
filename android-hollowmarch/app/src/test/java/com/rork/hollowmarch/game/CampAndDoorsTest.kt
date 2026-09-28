@@ -17,6 +17,7 @@ class CampAndDoorsTest {
     private val world = WorldGenerator.generate(424242L)
 
     private fun enterSite(engine: GameEngine, siteId: Int) {
+        engine.revealLandmark(siteId)
         val door = engine.map.portals.first { it.targetSiteId == siteId }
         engine.camera.x = door.x
         engine.camera.y = door.y

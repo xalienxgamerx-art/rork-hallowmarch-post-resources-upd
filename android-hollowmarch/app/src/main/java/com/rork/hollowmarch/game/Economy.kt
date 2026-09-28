@@ -549,11 +549,12 @@ class EconomySimulation private constructor(private val world: World) {
     fun tradeFlowsOf(site: Site, ledger: SettlementLedger, sites: List<Site>): List<TradeFlow> {
         val st = stateOf(site)
         val folk = ledger.folkOf(site).coerceAtLeast(0)
+        val byId = sites.associateBy { it.id }
         val flows = mutableListOf<TradeFlow>()
         for (key in st.routes.keys) {
             val route = parseRoute(key) ?: continue
             val otherId = if (route.fromId == site.id) route.toId else route.fromId
-            val partner = sites.firstOrNull { it.id == otherId } ?: continue
+            val partner = byId[otherId] ?: continue
             val partnerState = stateOf(partner)
             val folkPartner = ledger.folkOf(partner).coerceAtLeast(0)
             val capacity = (folk + folkPartner) / 4 + 20
@@ -1329,12 +1330,13 @@ class EconomySimulation private constructor(private val world: World) {
         if (material in localMaterials(site, ledger.folkOf(site).coerceAtLeast(0), st)) {
             return MaterialProvenance(material, MaterialSource.LOCAL)
         }
+        val byId = sites.associateBy { it.id }
         // one road's reach: a partner's own hands, not a partner's imports
         for (key in st.routes.keys) {
             val route = parseRoute(key) ?: continue
             if (route.cargo != material.name) continue
             val otherId = if (route.fromId == site.id) route.toId else route.fromId
-            val partner = sites.firstOrNull { it.id == otherId } ?: continue
+            val partner = byId[otherId] ?: continue
             if (material in localMaterials(partner, ledger.folkOf(partner).coerceAtLeast(0), stateOf(partner))) {
                 return MaterialProvenance(material, MaterialSource.IMPORTED, partner.id, partner.name)
             }
@@ -1402,7 +1404,7 @@ class EconomySimulation private constructor(private val world: World) {
             val parts = piece.split("=")
             if (parts.size < 10 || !parts[0].startsWith("S")) return@forEach
             val id = parts[0].removePrefix("S").toIntOrNull() ?: return@forEach
-            val site = world.sites.firstOrNull { it.id == id } ?: return@forEach
+            val site = world.siteOrNull(id) ?: return@forEach
             val st = stateOf(site)
             st.timber = parts[1].toIntOrNull() ?: st.timber
             st.timberGone = parts[2] == "1"

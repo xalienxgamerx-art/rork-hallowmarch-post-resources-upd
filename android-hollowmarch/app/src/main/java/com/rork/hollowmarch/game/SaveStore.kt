@@ -107,7 +107,7 @@ object SaveStore {
         val p = prefs ?: return null
         if (!p.contains(KEY_SEED)) return null
         val minutes = p.getFloat(KEY_MINUTES, 0f)
-        return SaveSlot(
+        val slot = SaveSlot(
             seed = p.getLong(KEY_SEED, 0L),
             day = (minutes / 1440f).toInt() + 1,
             minutes = minutes,
@@ -146,6 +146,13 @@ object SaveStore {
             history = p.getString(KEY_HISTORY, "") ?: "",
             worldVersion = p.getInt(KEY_WORLD_VERSION, 0)
         )
+        // A save from an older forge describes a province that no longer exists:
+        // clear it so every new game runs at the land's full scale.
+        if (slot.worldVersion != WORLD_STATE_VERSION) {
+            clear()
+            return null
+        }
+        return slot
     }
 
     fun save(slot: SaveSlot) {

@@ -7,6 +7,7 @@ import com.rork.hollowmarch.world.Rumor
 import com.rork.hollowmarch.world.Site
 import com.rork.hollowmarch.world.World
 import com.rork.hollowmarch.world.WorldGenerator
+import com.rork.hollowmarch.world.isSettlement
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,6 +20,8 @@ data class TitleState(
     val yearsSimulated: Int = 0,
     val peoples: Int = 0,
     val powers: Int = 0,
+    val places: Int = 0,
+    val souls: Int = 0,
     val ruins: Int = 0,
     val figures: Int = 0,
     val wars: Int = 0,
@@ -32,7 +35,7 @@ data class TitleState(
 data class WorldSettings(
     val seedText: String = "",
     val historyYears: Int = 400,
-    val maxEvents: Int = 220,
+    val maxEvents: Int = 600,
     val peoples: Int = 0
 ) {
     /** Words become numbers the same way every time, so a word forges the same world. */
@@ -77,7 +80,11 @@ class GameViewModel : ViewModel() {
             ageLabel = "${_world.currentAge.name}, Year ${_world.currentYear}",
             yearsSimulated = _world.currentYear,
             peoples = _world.cultures.size,
-            powers = _world.powers.size,
+            powers = _world.powers.count { !it.extinct },
+            places = _world.sites.size,
+            souls = _world.sites
+                .filter { it.isSettlement && !it.ruined }
+                .sumOf { it.population },
             ruins = _world.ruinCount,
             figures = _world.figures.size,
             wars = _world.warCount(),

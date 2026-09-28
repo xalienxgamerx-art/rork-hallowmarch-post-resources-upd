@@ -119,7 +119,7 @@ class InteractionSystem(private val engine: GameEngine, private val rng: Random)
 
     /** Lifting a keeper's things costs the place's regard — once per chest. */
     private fun stolenFrom(entity: Entity) {
-        val site = engine.world.sites.firstOrNull { it.id == engine.currentSiteId } ?: return
+        val site = engine.world.siteOrNull(engine.currentSiteId) ?: return
         if (!site.isSettlement || !entity.container) return
         engine.reputation.adjust(Layer.SETTLEMENT, site.id, -2, "Stole from the ${entity.name}")
         engine.emit(GameEvent.Note("The ${entity.name} will be missed, and the loss remembered."))
@@ -213,7 +213,7 @@ class InteractionSystem(private val engine: GameEngine, private val rng: Random)
         return if (rng.nextInt(100) < chance) {
             val coins = 2 + rng.nextInt(5) + target.level
             engine.brass += coins
-            engine.world.sites.firstOrNull { it.id == engine.currentSiteId }
+            engine.world.siteOrNull(engine.currentSiteId)
                 ?.takeIf { it.isSettlement }
                 ?.let { engine.reputation.adjust(Layer.SETTLEMENT, it.id, -1, "Picked a pocket") }
             engine.emit(GameEvent.Note("Your fingers find $coins brass in the ${target.name}'s pocket. It never stirs."))
@@ -321,7 +321,7 @@ class InteractionSystem(private val engine: GameEngine, private val rng: Random)
     /** The keeper's word: the folk of the place, and a rumor for the road. */
     private fun meetResident(soul: Entity) {
         engine.learnSkill(Skill.ETIQUETTE, 3f)
-        val site = engine.world.sites.firstOrNull { it.id == engine.currentSiteId }
+        val site = engine.world.siteOrNull(engine.currentSiteId)
         val folk = site?.let { engine.settlements.folkOf(it) } ?: 0
         val stage = site?.let { engine.stageAt(it).label } ?: "stead"
         engine.emit(

@@ -108,7 +108,7 @@ object WorldGenerator {
     fun generate(
         seed: Long,
         historyYears: Int = 400,
-        maxEvents: Int = 220,
+        maxEvents: Int = 600,
         cultureCount: Int = 0
     ): World {
         val rng = Random(seed)
@@ -155,6 +155,50 @@ object WorldGenerator {
         var nextSiteId = 0
         var nextPowerId = 0
 
+        // --- Scale infrastructure: a continent of places must stay cheap to fill. ---
+        // A neighborhood grid over the normalized map: hunting open ground asks only
+        // the cells around a candidate, never the whole province.
+        val placeCell = 0.05f
+        val placeGrid = HashMap<Long, MutableList<Site>>()
+        fun placeKey(cx: Int, cy: Int): Long = cx.toLong() * 65536L + cy.toLong()
+        val siteIdx = mutableMapOf<Int, Int>()
+        val siteById = mutableMapOf<Int, Site>()
+        fun registerSite(site: Site, idx: Int) {
+            siteIdx[site.id] = idx
+            siteById[site.id] = site
+            val key = placeKey((site.x / placeCell).toInt(), (site.y / placeCell).toInt())
+            placeGrid.getOrPut(key) { mutableListOf() }.add(site)
+        }
+        fun replaceSite(updated: Site) {
+            val idx = siteIdx[updated.id] ?: return
+            sites[idx] = updated
+            siteById[updated.id] = updated
+        }
+        // Where rivers wet the ground, on the terrain's own grid, so founding rolls
+        // need not walk every river point on every attempt.
+        val nearRiver = BooleanArray(terrain.size * terrain.size).also { wet ->
+            terrain.rivers.forEach { river ->
+                river.points.forEach { p ->
+                    val cx = (p.x * terrain.size).toInt()
+                    val cy = (p.y * terrain.size).toInt()
+                    for (dy2 in -6..6) for (dx2 in -6..6) {
+                        // 0.06 normalized is the old river-reach, squared per cell
+                        if (dx2 * dx2 + dy2 * dy2 > 33) continue
+                        val nx2 = cx + dx2
+                        val ny2 = cy + dy2
+                        if (nx2 in 0 until terrain.size && ny2 in 0 until terrain.size) {
+                            wet[ny2 * terrain.size + nx2] = true
+                        }
+                    }
+                }
+            }
+        }
+        fun riverAt(x: Float, y: Float): Boolean {
+            val cx = (x * terrain.size).toInt().coerceIn(0, terrain.size - 1)
+            val cy = (y * terrain.size).toInt().coerceIn(0, terrain.size - 1)
+            return nearRiver[cy * terrain.size + cx]
+        }
+
         // --- Living politics: houses, claims, agendas and the mood of each settlement. ---
         val houses = mutableListOf<House>()
         var nextHouseId = 0
@@ -180,22 +224,24 @@ object WorldGenerator {
                 val h = terrain.heightAt(x, y)
                 if (h < 0.42f || h > 0.74f) return@repeat
                 found = true
-                var nearest = Float.MAX_VALUE
-                for (s in sites) {
-                    val dx = x - s.x
-                    val dy = y - s.y
-                    nearest = minOf(nearest, sqrt(dx * dx + dy * dy))
-                }
-                var riverSq = Float.MAX_VALUE
-                for (river in terrain.rivers) {
-                    for (p in river.points) {
-                        val dx = x - p.x
-                        val dy = y - p.y
-                        riverSq = minOf(riverSq, dx * dx + dy * dy)
+                // the nearest neighbour, from the grid's own neighborhood: five cells
+                // out clears the widest spacing any kind of place asks for
+                val cx = (x / placeCell).toInt()
+                val cy = (y / placeCell).toInt()
+                var nearest = spacing
+                for (gx in cx - 2..cx + 2) {
+                    for (gy in cy - 2..cy + 2) {
+                        val bucket = placeGrid[placeKey(gx, gy)] ?: continue
+                        for (s in bucket) {
+                            val dx = x - s.x
+                            val dy = y - s.y
+                            val d = sqrt(dx * dx + dy * dy)
+                            if (d < nearest) nearest = d
+                        }
                     }
                 }
                 val score = minOf(nearest / spacing, 1f) * 10f +
-                    (if (riverSq < 0.0036f) 1.5f else 0f) +
+                    (if (riverAt(x, y)) 1.5f else 0f) +
                     rng.nextFloat()
                 if (score > best) {
                     best = score
@@ -226,11 +272,13 @@ object WorldGenerator {
             }
             val (px, py) = placeFor(
                 rng,
+                // spacing in true leagues across the province's league-wide measure:
+                // cities keep eight leagues between them, villages scarce more than one
                 when (kind) {
-                    SiteKind.CAPITAL, SiteKind.CITY -> 0.16f
-                    SiteKind.TOWN -> 0.12f
-                    SiteKind.VILLAGE -> 0.085f
-                    else -> 0.07f
+                    SiteKind.CAPITAL, SiteKind.CITY -> 8f / WORLD_LEAGUES
+                    SiteKind.TOWN -> 4f / WORLD_LEAGUES
+                    SiteKind.VILLAGE -> 1.6f / WORLD_LEAGUES
+                    else -> 1.0f / WORLD_LEAGUES
                 }
             )
             val site = Site(
@@ -253,6 +301,7 @@ object WorldGenerator {
                 }
             )
             sites += site
+            registerSite(site, sites.lastIndex)
             loyaltyNow[site.id] = 62 + rng.nextInt(24)
             stabilityNow[site.id] = 60 + rng.nextInt(28)
             garrisonNow[site.id] =
@@ -266,8 +315,16 @@ object WorldGenerator {
         val strengthNow = mutableMapOf<Int, Int>()
         val battlesWon = mutableMapOf<Int, Int>()
         val wealthNow = mutableMapOf<Int, Int>()
-        val structures = mutableListOf<Structure>()
+        // Living structures, kept by site: a province of thousands of halls
+        // cannot be filtered whole on every question.
+        val structuresBySite = HashMap<Int, MutableList<Structure>>()
         var nextStructureId = 0
+
+        fun replaceStructure(updated: Structure) {
+            val list = structuresBySite[updated.siteId] ?: return
+            val idx = list.indexOfFirst { it.id == updated.id }
+            if (idx >= 0) list[idx] = updated
+        }
         val wars = mutableListOf<War>()
         val grudge = mutableMapOf<Pair<Int, Int>, Int>()
         val extinctPowers = mutableSetOf<Int>()
@@ -311,7 +368,8 @@ object WorldGenerator {
 
         // --- Living structures: temples, taverns, markets, guild halls, catacombs. ---
         fun structuresAt(siteId: Int, kind: StructureKind? = null): List<Structure> =
-            structures.filter { it.siteId == siteId && (kind == null || it.kind == kind) && !it.ruined }
+            (structuresBySite[siteId] ?: emptyList())
+                .filter { (kind == null || it.kind == kind) && !it.ruined }
 
         fun livingKeeper(structure: Structure): Boolean =
             structure.keeperFigureId?.let { figures[it].diedYear == null } ?: false
@@ -345,7 +403,7 @@ object WorldGenerator {
                 foundedYear = year,
                 keeperFigureId = keeperIdx
             )
-            structures += structure
+            structuresBySite.getOrPut(site.id) { mutableListOf() }.add(structure)
             val keeper = figures[keeperIdx]
             events += ChronicleEvent(
                 year,
@@ -410,7 +468,7 @@ object WorldGenerator {
             val power = powers.firstOrNull { it.id == powerId } ?: return
             // Temple legitimacy calms a succession; a rich guild can buy one instead.
             val seat = power.capitalSiteId
-                ?.let { sid -> sites.firstOrNull { it.id == sid && !it.ruined } }
+                ?.let { sid -> siteById[sid]?.takeIf { !it.ruined } }
             val temple = seat?.let { s ->
                 structuresAt(s.id, StructureKind.TEMPLE).firstOrNull { livingKeeper(it) }
             }
@@ -539,9 +597,9 @@ object WorldGenerator {
 
         /** Markets and guild halls earn their keep each turn; dead keepers are replaced. */
         fun structureStep(year: Int) {
-            for (st in structures.toList()) {
+            for (st in structuresBySite.values.flatten()) {
                 if (st.ruined) continue
-                val site = sites.firstOrNull { it.id == st.siteId } ?: continue
+                val site = siteById[st.siteId] ?: continue
                 if (site.ruined) continue
                 val holder = site.holderPowerId
                 if (holder != null && holder !in extinctPowers) {
@@ -571,8 +629,9 @@ object WorldGenerator {
                     }
                 }
                 if (kIdx != null && figures[kIdx].diedYear != null) {
-                    structures[structures.indexOfFirst { it.id == st.id }] =
+                    replaceStructure(
                         st.copy(keeperFigureId = coinKeeper(site, st.kind, year, holderCultureOf(site)))
+                    )
                 }
             }
             // Swelling towns pour and trade; the dead pile up under the hill.
@@ -722,7 +781,7 @@ object WorldGenerator {
                 madeYear = year
             )
             val claimant = powers.firstOrNull { it.id == powerId }
-            val site = sites.firstOrNull { it.id == siteId }
+            val site = siteById[siteId]
             events += ChronicleEvent(
                 year,
                 EventKind.CLAIM,
@@ -749,8 +808,8 @@ object WorldGenerator {
             val claimPair = claims
                 .filter { it.claimantPowerId == attacker.id }
                 .mapNotNull { c ->
-                    val targetSite = sites.firstOrNull {
-                        it.id == c.siteId && !it.ruined && it.kind != SiteKind.VAULT &&
+                    val targetSite = siteById[c.siteId]?.takeIf {
+                        !it.ruined && it.kind != SiteKind.VAULT &&
                             it.holderPowerId != null && it.holderPowerId != attacker.id
                     }
                     if (targetSite == null) null else c to targetSite
@@ -824,15 +883,15 @@ object WorldGenerator {
         }
 
         fun captureSite(site: Site, attacker: Power, defender: Power, year: Int) {
-            val idx = sites.indexOfFirst { it.id == site.id }
-            if (idx < 0) return
-            val old = sites[idx]
+            val old = siteById[site.id] ?: return
             val burned = rng.nextInt(4) == 0
-            sites[idx] = old.copy(
-                holderPowerId = attacker.id,
-                sackedCount = old.sackedCount + 1,
-                population = if (burned) 0 else (old.population * 2 / 3).coerceAtLeast(10),
-                ruined = burned
+            replaceSite(
+                old.copy(
+                    holderPowerId = attacker.id,
+                    sackedCount = old.sackedCount + 1,
+                    population = if (burned) 0 else (old.population * 2 / 3).coerceAtLeast(10),
+                    ruined = burned
+                )
             )
             // The conquered keep their own counsel: loyalty collapses under new banners.
             loyaltyNow[old.id] = 15 + rng.nextInt(25)
@@ -840,11 +899,13 @@ object WorldGenerator {
             if (burned) {
                 ruinedSiteIds += old.id
                 var burnedHalls = 0
-                for (i in structures.indices) {
-                    val st = structures[i]
-                    if (st.siteId == old.id && !st.ruined) {
-                        structures[i] = st.copy(ruined = true)
-                        burnedHalls++
+                structuresBySite[old.id]?.let { halls ->
+                    for (j in halls.indices) {
+                        val st = halls[j]
+                        if (!st.ruined) {
+                            halls[j] = st.copy(ruined = true)
+                            burnedHalls++
+                        }
                     }
                 }
                 scatterArtifacts(old, year + 1)
@@ -935,7 +996,7 @@ object WorldGenerator {
                     endWar(draft, year, "both halls had other griefs")
                     return
                 }
-                val site = sites.firstOrNull { it.id == draft.targetSiteId } ?: sites.first()
+                val site = siteById[draft.targetSiteId] ?: sites.first()
                 val atkGen = generalFor(attacker, year)
                 val defGen = generalFor(defender, year)
                 val atkStr = strengthNow[attacker.id] ?: 40
@@ -1045,18 +1106,19 @@ object WorldGenerator {
             val restless = (loyaltyNow[target.id] ?: 70) < 35
             val lost = (target.population * (30 + rng.nextInt(30)) / 100 * (if (restless) 5 else 4) / 4)
                 .coerceAtLeast(20)
-            val idx = sites.indexOfFirst { it.id == target.id }
             val remaining = target.population - lost
             if (target.isSettlement && remaining < 25) {
                 // The rot wins: the last families walk away and the place dies for good.
                 // Only the catacombs keep; the dead stay when the living will not.
-                for (i in structures.indices) {
-                    val st = structures[i]
-                    if (st.siteId == target.id && !st.ruined && st.kind != StructureKind.CATACOMB) {
-                        structures[i] = st.copy(ruined = true)
+                structuresBySite[target.id]?.let { halls ->
+                    for (j in halls.indices) {
+                        val st = halls[j]
+                        if (!st.ruined && st.kind != StructureKind.CATACOMB) {
+                            halls[j] = st.copy(ruined = true)
+                        }
                     }
                 }
-                sites[idx] = target.copy(population = 0, ruined = true)
+                replaceSite(target.copy(population = 0, ruined = true))
                 ruinedSiteIds += target.id
                 events += ChronicleEvent(
                     year,
@@ -1065,7 +1127,7 @@ object WorldGenerator {
                         if (rng.nextBoolean()) "the grey rot has won." else "the empty granaries have won."
                 )
             } else {
-                sites[idx] = target.copy(population = remaining)
+                replaceSite(target.copy(population = remaining))
                 loyaltyNow[target.id] = ((loyaltyNow[target.id] ?: 70) - (10 + rng.nextInt(16))).coerceIn(0, 100)
                 stabilityNow[target.id] = ((stabilityNow[target.id] ?: 70) - (8 + rng.nextInt(12))).coerceIn(0, 100)
                 val catacombs = structuresAt(target.id, StructureKind.CATACOMB).isNotEmpty()
@@ -1087,69 +1149,129 @@ object WorldGenerator {
         }
 
         fun foundingStep(year: Int) {
-            val culture = cultures.random(rng)
-            val holder = powers.filter { it.cultureId == culture.id && it.id !in extinctPowers }.randomOrNull(rng)
-            val kind = when (rng.nextInt(10)) {
-                in 0..5 -> SiteKind.VILLAGE
-                6 -> SiteKind.TOWN
-                in 7..8 -> SiteKind.CAMP
-                else -> SiteKind.HOLDFAST
+            // The founding law: souls beget steads. A fuller province founds more,
+            // and crowded ground begets new hamlets beside the old — the count of
+            // places is whatever the centuries produce, never a number the forge
+            // is told. Wild places accumulate the same way: camps, ruins, shrines.
+            val souls = sites.sumOf { it.population }
+            repeat(souls / 10000 + sites.size / 120 + 1) {
+                val culture = cultures.random(rng)
+                val holder = powers.filter { it.cultureId == culture.id && it.id !in extinctPowers }
+                    .randomOrNull(rng)
+                val kind = when (rng.nextInt(100)) {
+                    in 0..54 -> SiteKind.VILLAGE
+                    in 55..74 -> SiteKind.CAMP
+                    in 75..84 -> SiteKind.HOLDFAST
+                    in 85..92 -> SiteKind.TOWN
+                    in 93..96 -> SiteKind.RUIN
+                    else -> SiteKind.SHRINE
+                }
+                val newSite = coinSite(kind, culture.id, holder?.id, "founded in year $year", year)
+                if (kind == SiteKind.TOWN) {
+                    coinStructure(newSite, StructureKind.TAVERN, year, culture.id)
+                    coinStructure(newSite, StructureKind.MARKET, year, culture.id)
+                }
+                // The chronicle keeps the halls and holy ground; hamlets and camps
+                // live in the tithe rolls without an entry apiece.
+                if (kind == SiteKind.TOWN || kind == SiteKind.HOLDFAST ||
+                    kind == SiteKind.SHRINE || kind == SiteKind.RUIN
+                ) {
+                    events += ChronicleEvent(
+                        year,
+                        if (kind == SiteKind.RUIN) EventKind.RUIN else EventKind.FOUNDING,
+                        if (kind == SiteKind.RUIN) {
+                            "${newSite.name} stands empty; no living people claims its stones."
+                        } else {
+                            "${holder?.name ?: "The ${culture.epithet}"} found ${newSite.name}, " +
+                                "a ${kind.label}, in ${culture.homeland}."
+                        }
+                    )
+                }
             }
-            val newSite = coinSite(kind, culture.id, holder?.id, "founded in year $year", year)
-            if (kind == SiteKind.TOWN) {
-                coinStructure(newSite, StructureKind.TAVERN, year, culture.id)
-                coinStructure(newSite, StructureKind.MARKET, year, culture.id)
-            }
-            events += ChronicleEvent(
-                year,
-                EventKind.FOUNDING,
-                "${holder?.name ?: "The ${culture.epithet}"} found ${newSite.name}, a ${kind.label}, in ${culture.homeland}."
-            )
         }
 
-        /** Villages swell into towns, towns into cities; the tithe rolls remember. */
-        fun growthStep(year: Int) {
-            val living = sites.filter { !it.ruined && it.population > 0 && it.isSettlement }
-            val target = living.randomOrNull(rng) ?: return
-            var grown = (target.population * (6 + rng.nextInt(15)) / 100).coerceAtLeast(1)
-            // Restless towns grow half as fast: unrest strangles the market carts.
-            val restless = (loyaltyNow[target.id] ?: 70) < 35
-            if (restless) grown /= 2
-            val newPop = target.population + grown
-            val newKind = when {
-                target.kind == SiteKind.VILLAGE && newPop >= 320 -> SiteKind.TOWN
-                target.kind == SiteKind.TOWN && newPop >= 2400 -> SiteKind.CITY
-                else -> target.kind
-            }
-            val updated = target.copy(population = newPop, kind = newKind)
-            sites[sites.indexOfFirst { it.id == target.id }] = updated
-            val holderCulture = holderCultureOf(target)
-            if (newKind != target.kind) {
-                if (newKind == SiteKind.TOWN) {
-                    if (structuresAt(target.id, StructureKind.MARKET).isEmpty()) {
-                        coinStructure(updated, StructureKind.MARKET, year, holderCulture)
+        /** How thickly folk stand around a place: neighbours within a few leagues. */
+        fun crowdOf(site: Site): Int {
+            val cx = (site.x / placeCell).toInt()
+            val cy = (site.y / placeCell).toInt()
+            var n = 0
+            for (gx in cx - 1..cx + 1) {
+                for (gy in cy - 1..cy + 1) {
+                    val bucket = placeGrid[placeKey(gx, gy)] ?: continue
+                    for (s in bucket) {
+                        if (s.id == site.id || s.ruined) continue
+                        val dx = site.x - s.x
+                        val dy = site.y - s.y
+                        // within 0.03 normalized — about two and a half leagues
+                        if (dx * dx + dy * dy < 0.0009f) n++
                     }
-                    if (structuresAt(target.id, StructureKind.TEMPLE).isEmpty()) {
-                        coinStructure(updated, StructureKind.TEMPLE, year, holderCulture)
-                    }
-                } else if (newKind == SiteKind.CITY && structuresAt(target.id, StructureKind.GUILD).isEmpty()) {
-                    coinStructure(updated, StructureKind.GUILD, year, holderCulture)
                 }
-            } else if (
-                target.kind == SiteKind.VILLAGE && newPop >= 60 &&
-                structuresAt(target.id, StructureKind.TAVERN).isEmpty() && rng.nextInt(5) == 0
-            ) {
-                coinStructure(updated, StructureKind.TAVERN, year, holderCulture)
             }
-            events += ChronicleEvent(
-                year,
-                EventKind.GROWTH,
-                (when (newKind) {
-                    target.kind -> "${target.name} grows; ${format(grown)} more souls pay the tithe."
-                    SiteKind.TOWN -> "${target.name} outgrows its palisade and is counted a town."
-                    else -> "${target.name} is chartered a city; its tolls are reckoned in ingots now."
-                }) + if (restless) " Unrest strangles the market." else ""
-            )
+            return n
+        }
+
+        /** The richness of the ground under a place: kind land and rivers feed crowds. */
+        fun groundOf(site: Site): Float {
+            val base = when (terrain.biomeAt(site.x, site.y)) {
+                Biome.DOWNS, Biome.FOREST -> 1.0f
+                Biome.HILLS -> 0.75f
+                Biome.MOOR -> 0.6f
+                Biome.MARSH -> 0.45f
+                else -> 0.25f
+            }
+            return if (riverAt(site.x, site.y)) base + 0.15f else base
+        }
+
+        /** Villages swell into towns, towns into cities — but the ground decides where. */
+        fun growthStep(year: Int) {
+            for (i in sites.indices) {
+                val target = sites[i]
+                if (target.ruined || !target.isSettlement || target.population <= 0) continue
+                // Restless towns grow half as fast: unrest strangles the market carts.
+                val restless = (loyaltyNow[target.id] ?: 70) < 35
+                // Crowded ground starves growth; kind, rivered ground feeds it.
+                val rate = (1 + rng.nextInt(6)) / 100f *
+                    groundOf(target) * (7f / (7f + crowdOf(target))) *
+                    (if (restless) 0.5f else 1f)
+                if (rate <= 0f) continue
+                val grown = (target.population * rate).toInt().coerceAtLeast(1)
+                val newPop = target.population + grown
+                val newKind = when {
+                    target.kind == SiteKind.VILLAGE && newPop >= 320 -> SiteKind.TOWN
+                    target.kind == SiteKind.TOWN && newPop >= 2400 -> SiteKind.CITY
+                    else -> target.kind
+                }
+                val updated = target.copy(population = newPop, kind = newKind)
+                sites[i] = updated
+                siteById[target.id] = updated
+                val holderCulture = holderCultureOf(target)
+                if (newKind != target.kind) {
+                    if (newKind == SiteKind.TOWN) {
+                        if (structuresAt(target.id, StructureKind.MARKET).isEmpty()) {
+                            coinStructure(updated, StructureKind.MARKET, year, holderCulture)
+                        }
+                        if (structuresAt(target.id, StructureKind.TEMPLE).isEmpty()) {
+                            coinStructure(updated, StructureKind.TEMPLE, year, holderCulture)
+                        }
+                    } else if (newKind == SiteKind.CITY && structuresAt(target.id, StructureKind.GUILD).isEmpty()) {
+                        coinStructure(updated, StructureKind.GUILD, year, holderCulture)
+                    }
+                    events += ChronicleEvent(
+                        year,
+                        EventKind.GROWTH,
+                        (if (newKind == SiteKind.TOWN) {
+                            "${target.name} outgrows its palisade and is counted a town."
+                        } else {
+                            "${target.name} is chartered a city; its tolls are reckoned in ingots now."
+                        }) + if (restless) " Unrest strangles the market." else ""
+                    )
+                } else if (
+                    target.kind == SiteKind.VILLAGE && newPop >= 60 &&
+                    structuresAt(target.id, StructureKind.TAVERN).isEmpty() && rng.nextInt(40) == 0
+                ) {
+                    coinStructure(updated, StructureKind.TAVERN, year, holderCulture)
+                }
+            }
         }
 
         /** A power names its largest living settlement its high seat. */
@@ -1160,7 +1282,7 @@ object WorldGenerator {
                 .maxByOrNull { it.population } ?: return
             if (seat.kind == SiteKind.CAPITAL) return
             val exalted = seat.copy(kind = SiteKind.CAPITAL)
-            sites[sites.indexOfFirst { it.id == seat.id }] = exalted
+            replaceSite(exalted)
             powers[powers.indexOfFirst { it.id == power.id }] =
                 power.copy(capitalSiteId = seat.id)
             if (structuresAt(seat.id, StructureKind.TEMPLE).isEmpty()) {
@@ -1250,7 +1372,7 @@ object WorldGenerator {
                 )
             } else {
                 val beast = living.random(rng)
-                val lair = sites.firstOrNull { it.id == beast.lairSiteId } ?: return
+                val lair = siteById[beast.lairSiteId] ?: return
                 val near = sites.filter { it.id != lair.id && it.population > 0 }
                     .minByOrNull { dist(lair.x, lair.y, it.x, it.y) } ?: return
                 val taken = 3 + rng.nextInt(30)
@@ -1319,7 +1441,7 @@ object WorldGenerator {
                 }
             }
             // When loyalty and order collapse, a town raises its own banner.
-            for (site in sites.toList()) {
+            for (site in sites) {
                 if (site.ruined || !site.isSettlement) continue
                 val holderId = site.holderPowerId ?: continue
                 if (holderId in extinctPowers) continue
@@ -1335,8 +1457,7 @@ object WorldGenerator {
                 rulerDeathAge[leaderIdx] = 46 + rng.nextInt(36)
                 val banner = rebels.copy(capitalSiteId = site.id)
                 powers[powers.indexOfFirst { it.id == rebels.id }] = banner
-                sites[sites.indexOfFirst { it.id == site.id }] =
-                    site.copy(holderPowerId = banner.id, sackedCount = site.sackedCount + 1)
+                replaceSite(site.copy(holderPowerId = banner.id, sackedCount = site.sackedCount + 1))
                 loyaltyNow[site.id] = 55 + rng.nextInt(20)
                 garrisonNow[site.id] = 10
                 events += ChronicleEvent(
@@ -1346,11 +1467,11 @@ object WorldGenerator {
                         "${figures[leaderIdx].name} the free-lord keeps its gates now."
                 )
                 // Neighbours of the same people may follow the banner.
-                for (near in sites.toList()) {
+                for (near in sites) {
                     if (near.id == site.id || near.ruined || !near.isSettlement) continue
                     if (near.holderPowerId != holderId || holderCultureOf(near) != banner.cultureId) continue
                     if (rng.nextInt(3) != 0) continue
-                    sites[sites.indexOfFirst { it.id == near.id }] = near.copy(holderPowerId = banner.id)
+                    replaceSite(near.copy(holderPowerId = banner.id))
                     loyaltyNow[near.id] = 55 + rng.nextInt(20)
                     events += ChronicleEvent(
                         year,
@@ -1386,8 +1507,7 @@ object WorldGenerator {
                             if (rng.nextBoolean()) PowerKind.HOLDFAST else PowerKind.ORDER,
                             power.cultureId, year, contestedPower, power.deityId
                         )
-                        sites[sites.indexOfFirst { it.id == defected.id }] =
-                            defected.copy(holderPowerId = rebelBanner.id)
+                        replaceSite(defected.copy(holderPowerId = rebelBanner.id))
                         val rebelSeat = rebelBanner.copy(capitalSiteId = defected.id)
                         powers[powers.indexOfFirst { it.id == rebelBanner.id }] = rebelSeat
                         figures[rival] = figures[rival].copy(title = rulerTitle(rebelSeat.kind), powerId = rebelSeat.id)
@@ -1445,26 +1565,27 @@ object WorldGenerator {
         // --- Simulate the centuries.
         var year = 20
         while (year < totalYears) {
-            year += 4 + rng.nextInt(14)
+            year += 2 + rng.nextInt(5)
             if (year >= totalYears) break
 
             if (year in (floodYear - 2)..(floodYear + 2)) continue
 
             structureStep(year)
             politicsStep(year)
+            // The living tide: folk multiply and new steads are founded every pass.
+            growthStep(year)
+            foundingStep(year)
 
             when (rng.nextInt(100)) {
                 in 0..21 -> warStep(year)
                 in 22..25 -> mortalityStep(year)
-                in 26..31 -> foundingStep(year)
-                in 32..36 -> schismStep(year)
-                in 37..40 -> hardshipStep(year)
-                in 41..44 -> artifactStep(year)
-                in 45..49 -> beastStep(year)
-                in 50..53 -> mortalityStep(year)
-                in 54..55 -> cultureStep(year)
-                in 56..63 -> growthStep(year)
-                in 64..66 -> capitalStep(year)
+                in 26..31 -> schismStep(year)
+                in 32..36 -> hardshipStep(year)
+                in 37..40 -> artifactStep(year)
+                in 41..45 -> beastStep(year)
+                in 46..49 -> mortalityStep(year)
+                in 50..51 -> cultureStep(year)
+                in 52..55 -> capitalStep(year)
                 else -> minorStep(year)
             }
         }
@@ -1478,14 +1599,17 @@ object WorldGenerator {
         if (floodVictim != null) {
             val victimDead = floodVictim.population
             // The flood takes the halls; the catacombs keep, drowned and sealed.
-            for (i in structures.indices) {
-                val st = structures[i]
-                if (st.siteId == floodVictim.id && !st.ruined && st.kind != StructureKind.CATACOMB) {
-                    structures[i] = st.copy(ruined = true)
+            structuresBySite[floodVictim.id]?.let { halls ->
+                for (j in halls.indices) {
+                    val st = halls[j]
+                    if (!st.ruined && st.kind != StructureKind.CATACOMB) {
+                        halls[j] = st.copy(ruined = true)
+                    }
                 }
             }
-            sites[sites.indexOfFirst { it.id == floodVictim.id }] =
+            replaceSite(
                 floodVictim.copy(population = 0, ruined = true, note = "gone under in the drowning")
+            )
             ruinedSiteIds += floodVictim.id
             events.list += ChronicleEvent(
                 floodYear,
@@ -1541,10 +1665,7 @@ object WorldGenerator {
         if (sites.none { it.kind == SiteKind.CAPITAL && !it.ruined && it.population > 0 }) {
             sites.filter { !it.ruined && it.isSettlement && it.population > 0 }
                 .maxByOrNull { it.population }
-                ?.let { seat ->
-                    sites[sites.indexOfFirst { it.id == seat.id }] =
-                        seat.copy(kind = SiteKind.CAPITAL)
-                }
+                ?.let { seat -> replaceSite(seat.copy(kind = SiteKind.CAPITAL)) }
         }
         // And at least one market town: if every town burned, rotted or drowned,
         // the largest living stead is counted a town, with its market and pour house.
@@ -1555,30 +1676,12 @@ object WorldGenerator {
                     it.kind != SiteKind.CAPITAL && it.kind != SiteKind.CITY
             }.maxByOrNull { it.population }?.let { stead ->
                 val promoted = stead.copy(kind = SiteKind.TOWN)
-                sites[sites.indexOfFirst { it.id == stead.id }] = promoted
+                replaceSite(promoted)
                 if (structuresAt(stead.id, StructureKind.MARKET).isEmpty()) {
-                    structures += Structure(
-                        id = nextStructureId++,
-                        siteId = promoted.id,
-                        kind = StructureKind.MARKET,
-                        name = "${promoted.name} Market",
-                        foundedYear = totalYears,
-                        keeperFigureId = coinKeeper(
-                            promoted, StructureKind.MARKET, totalYears, holderCultureOf(promoted)
-                        )
-                    )
+                    coinStructure(promoted, StructureKind.MARKET, totalYears, holderCultureOf(promoted))
                 }
                 if (structuresAt(stead.id, StructureKind.TAVERN).isEmpty()) {
-                    structures += Structure(
-                        id = nextStructureId++,
-                        siteId = promoted.id,
-                        kind = StructureKind.TAVERN,
-                        name = "The ${ADJECTIVES.random(rng)} ${NOUNS.random(rng)}",
-                        foundedYear = totalYears,
-                        keeperFigureId = coinKeeper(
-                            promoted, StructureKind.TAVERN, totalYears, holderCultureOf(promoted)
-                        )
-                    )
+                    coinStructure(promoted, StructureKind.TAVERN, totalYears, holderCultureOf(promoted))
                 }
             }
         }
@@ -1593,18 +1696,9 @@ object WorldGenerator {
                 .maxByOrNull { it.population }
                 ?.let { town ->
                     val chartered = town.copy(kind = SiteKind.CITY)
-                    sites[sites.indexOfFirst { it.id == town.id }] = chartered
+                    replaceSite(chartered)
                     if (structuresAt(town.id, StructureKind.GUILD).isEmpty()) {
-                        structures += Structure(
-                            id = nextStructureId++,
-                            siteId = chartered.id,
-                            kind = StructureKind.GUILD,
-                            name = "The ${ADJECTIVES.random(rng)} Hall",
-                            foundedYear = totalYears,
-                            keeperFigureId = coinKeeper(
-                                chartered, StructureKind.GUILD, totalYears, holderCultureOf(chartered)
-                            )
-                        )
+                        coinStructure(chartered, StructureKind.GUILD, totalYears, holderCultureOf(chartered))
                     }
                 }
         }
@@ -1617,7 +1711,7 @@ object WorldGenerator {
             if (holder != null && holder.id !in extinctPowers) {
                 entries += holder.name to 30 + (garrisonNow[site.id] ?: 0) / 3
             }
-            structures.firstOrNull { it.siteId == site.id && it.kind == StructureKind.GUILD && !it.ruined }
+            structuresBySite[site.id]?.firstOrNull { it.kind == StructureKind.GUILD && !it.ruined }
                 ?.let { hall ->
                     val guild = powers.firstOrNull {
                         it.kind == PowerKind.GUILD && it.id !in extinctPowers &&
@@ -1625,7 +1719,7 @@ object WorldGenerator {
                     }
                     entries += (guild?.name ?: hall.name) to 16 + (guild?.let { (wealthNow[it.id] ?: 0) / 30 } ?: 0)
                 }
-            structures.firstOrNull { it.siteId == site.id && it.kind == StructureKind.TEMPLE && !it.ruined }
+            structuresBySite[site.id]?.firstOrNull { it.kind == StructureKind.TEMPLE && !it.ruined }
                 ?.let { temple ->
                     entries += temple.name to 12 + (if (livingKeeper(temple)) 8 else 0)
                 }
@@ -1670,7 +1764,6 @@ object WorldGenerator {
         )
         val allEvents = (events.list + omens).sortedBy { it.year }
         val rumors = generateRumors(rng, allEvents, sites, finalPowers, vault, beasts, artifacts, wars)
-        val structureBySite = structures.groupBy { it.siteId }
 
         return World(
             seed = seed,
@@ -1684,7 +1777,7 @@ object WorldGenerator {
             events = allEvents,
             sites = sites.map {
                 it.copy(
-                    structures = structureBySite[it.id].orEmpty(),
+                    structures = structuresBySite[it.id].orEmpty(),
                     stability = stabilityNow[it.id] ?: 70,
                     loyalty = loyaltyNow[it.id] ?: 70,
                     garrison = garrisonNow[it.id] ?: 0,

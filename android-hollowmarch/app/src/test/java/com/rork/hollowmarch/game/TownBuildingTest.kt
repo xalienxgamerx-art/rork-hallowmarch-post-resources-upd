@@ -105,6 +105,7 @@ class TownBuildingTest {
     fun theDoorAnswersOnlyAtTheThreshold() {
         val engine = GameEngine(world, null, null).apply { climbToOpenGround() }
         val site = village()
+        engine.revealLandmark(site.id)
         val gate = engine.map.portals.first { it.targetSiteId == site.id }
         engine.camera.x = gate.x
         engine.camera.y = gate.y

@@ -1,5 +1,6 @@
 package com.rork.hollowmarch.game
 
+import com.rork.hollowmarch.world.Site
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -182,6 +183,14 @@ class GameMap(
 
     /** Where you stand when you walk out of a site into open country: site id to spot. */
     val entrySpots = mutableMapOf<Int, Pair<Float, Float>>()
+
+    /**
+     * The lesser places whose landmark is not yet drawn: a continent of villages
+     * and ruins is stamped onto the open ground as the walker comes near them.
+     * Bucketed by tens of cells, so the near-look is a handful of lookups.
+     */
+    val pendingLandmarks = HashMap<Long, MutableList<Site>>()
+    val stampedSites = mutableSetOf<Int>()
 
     fun tileAt(x: Int, y: Int): Int {
         if (x < 0 || y < 0 || x >= width || y >= height) return Textures.WALL_STONE

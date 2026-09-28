@@ -491,7 +491,7 @@ private fun eventYear(events: List<AgeEvent>, kind: AgeEventKind, needle: String
 
 /** The name of a site by id, or "afar" when the place is gone. */
 private fun nameOf(world: World, siteId: Int): String =
-    world.sites.firstOrNull { it.id == siteId }?.name ?: "afar"
+    world.siteOrNull(siteId)?.name ?: "afar"
 
 /** A cargo's name in the player's tongue, from whatever registry it belongs to. */
 internal fun cargoWord(cargo: String): String = when {

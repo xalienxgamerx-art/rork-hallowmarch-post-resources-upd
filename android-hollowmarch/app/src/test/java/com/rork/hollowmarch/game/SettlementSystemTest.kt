@@ -37,6 +37,7 @@ class SettlementSystemTest {
 
     private fun enter(siteId: Int): GameEngine {
         val engine = GameEngine(world, null, null).apply { climbToOpenGround() }
+        engine.revealLandmark(siteId)
         val door = engine.map.portals.first { it.targetSiteId == siteId }
         engine.camera.x = door.x
         engine.camera.y = door.y

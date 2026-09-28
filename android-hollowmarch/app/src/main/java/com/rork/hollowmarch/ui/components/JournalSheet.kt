@@ -531,7 +531,7 @@ private fun PowerRow(world: World, power: Power, standing: Int) {
             if (pressed.isNotEmpty()) {
                 MonoText(
                     "presses a claim on " + pressed.joinToString { claim ->
-                        val site = world.sites.firstOrNull { it.id == claim.siteId }
+                        val site = world.siteOrNull(claim.siteId)
                         "${site?.name ?: "lost ground"} (${claim.strength})"
                     },
                     color = Ink.Brass,
@@ -554,25 +554,67 @@ private fun PowerRow(world: World, power: Power, standing: Int) {
 /** The province's steads: who owns them, who really holds sway, and how restive they are. */
 @Composable
 private fun TownsTab(world: World, engine: GameEngine?) {
-    val steads = world.sites
-        .filter { it.isSettlement && !it.ruined && it.population > 0 }
-        .sortedByDescending { engine?.folkOf(it.id) ?: it.population }
+    var query by remember { mutableStateOf("") }
+    JournalSearchField(query, { query = it }, Modifier.padding(bottom = 4.dp))
+    val steads = remember(query, engine) {
+        world.sites
+            .filter { it.isSettlement && !it.ruined && it.population > 0 }
+            .filter {
+                query.isBlank() || it.name.contains(query, ignoreCase = true) ||
+                    (world.power(it.holderPowerId)?.name?.contains(query, ignoreCase = true) == true)
+            }
+    }
+    // The steads stand under their banners first: a province of thousands is
+    // browsed by kingdom, not one endless roll.
+    val realms = steads
+        .groupBy { world.power(it.holderPowerId)?.name ?: "Unclaimed" }
+        .map { (realm, list) ->
+            Triple(
+                realm,
+                list.sortedByDescending { engine?.folkOf(it.id) ?: it.population },
+                list.sumOf { engine?.folkOf(it.id) ?: it.population }
+            )
+        }
+        .sortedByDescending { it.third }
     LazyColumn(modifier = Modifier.fillMaxWidth()) {
-        items(steads, key = { it.id }) { site ->
-            TownRow(
-                world,
-                site,
-                engine?.visitedSites ?: emptySet(),
-                engine,
-                folk = engine?.folkOf(site.id) ?: site.population,
-                stageLabel = engine?.stageAt(site)?.label ?: site.kind.label
-            )
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(1.dp)
-                    .background(Ink.Hairline.copy(alpha = 0.5f))
-            )
+        realms.forEach { (realm, list, souls) ->
+            item(key = "realm-$realm") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp, bottom = 2.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        realm,
+                        color = Ink.Brass,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    MonoText(
+                        "${list.size} steads · ${groupDigits(souls)} souls",
+                        color = Ink.Faded,
+                        fontSize = 10.sp
+                    )
+                }
+            }
+            items(list, key = { "stead-$realm-${it.id}" }) { site ->
+                TownRow(
+                    world,
+                    site,
+                    engine?.visitedSites ?: emptySet(),
+                    engine,
+                    folk = engine?.folkOf(site.id) ?: site.population,
+                    stageLabel = engine?.stageAt(site)?.label ?: site.kind.label
+                )
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(1.dp)
+                        .background(Ink.Hairline.copy(alpha = 0.5f))
+                )
+            }
         }
     }
 }

@@ -133,6 +133,7 @@ class InteractionSystemTest {
     fun anEmptiedKeepersChestCostsThePlaceItsRegard() {
         val engine = engine()
         val site = world.sites.first { it.isSettlement && !it.ruined && it.population > 0 }
+        engine.revealLandmark(site.id)
         val door = engine.map.portals.first { it.targetSiteId == site.id }
         engine.camera.x = door.x
         engine.camera.y = door.y
@@ -229,6 +230,7 @@ class InteractionSystemTest {
     fun theWorldRemembersTheEmptiedChestThroughTheSave() {
         val engine = engine()
         val site = world.sites.first { it.isSettlement && !it.ruined && it.population > 0 }
+        engine.revealLandmark(site.id)
         val door = engine.map.portals.first { it.targetSiteId == site.id }
         engine.camera.x = door.x
         engine.camera.y = door.y

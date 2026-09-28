@@ -123,6 +123,16 @@ fun TitleScreen(
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth()
                 )
+                MonoText(
+                    text = "a province of ${group(state.places)} places · ${state.powers} realms · " +
+                        "${group(state.souls)} souls",
+                    color = Ink.Parchment.copy(alpha = 0.8f),
+                    fontSize = 12.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 3.dp)
+                )
                 EngravedRule(Modifier.padding(vertical = 12.dp))
 
                 Row(
@@ -254,6 +264,10 @@ fun TitleScreen(
         }
     }
 }
+
+/** Thousands with their commas, as the chronicle counts them. */
+private fun group(n: Int): String =
+    n.toString().reversed().chunked(3).joinToString(",").reversed()
 
 @Composable
 private fun ForgeStat(value: String, label: String) {

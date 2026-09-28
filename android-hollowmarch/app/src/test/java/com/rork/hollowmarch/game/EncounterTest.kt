@@ -135,6 +135,7 @@ class EncounterTest {
 
         // the lair keeps no chronicle beast now: a fallback takes the empty post
         val again = GameEngine(world, saved, null)
+        again.revealLandmark(lair.id)
         val door = again.overland.portals.first { it.targetSiteId == lair.id }
         again.camera.x = door.x
         again.camera.y = door.y

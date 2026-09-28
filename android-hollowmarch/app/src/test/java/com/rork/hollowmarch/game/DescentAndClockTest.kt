@@ -75,6 +75,7 @@ class DescentAndClockTest {
         // and another hostile site altogether: its doorstep, not its depths
         val ruin = world.sites.first { it.kind == SiteKind.RUIN }
         engine.climbToOpenGround()
+        engine.revealLandmark(ruin.id)
         val ruinDoor = engine.map.portals.first { it.targetSiteId == ruin.id }
         engine.camera.x = ruinDoor.x
         engine.camera.y = ruinDoor.y

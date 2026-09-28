@@ -149,6 +149,7 @@ class OverlandTest {
     fun theOpenRoadRidesTheSave() {
         val engine = GameEngine(world, null, null).apply { climbToOpenGround() }
         val settlement = world.sites.first { it.isSettlement }
+        engine.revealLandmark(settlement.id)
         val door = engine.overland.portals.first { it.targetSiteId == settlement.id }
         engine.camera.x = door.x
         engine.camera.y = door.y

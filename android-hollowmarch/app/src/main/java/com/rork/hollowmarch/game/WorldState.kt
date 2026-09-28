@@ -20,7 +20,7 @@ import com.rork.hollowmarch.world.World
  */
 
 /** The state contract's version, written into every save so old ones can be read. */
-const val WORLD_STATE_VERSION = 1
+const val WORLD_STATE_VERSION = 2
 
 /** The kinds of thing the world remembers by name of number, not by given name. */
 enum class PersistKind(val tag: String) {
@@ -487,7 +487,7 @@ object SceneBinder {
      * legally stand.
      */
     fun remember(state: WorldState, world: World, siteId: Int, floor: Int, map: GameMap) {
-        val powerId = world.sites.firstOrNull { it.id == siteId }?.holderPowerId ?: -1
+        val powerId = world.siteOrNull(siteId)?.holderPowerId ?: -1
         map.entities.forEach { entity ->
             if (!entity.resident || entity.persistId.isBlank()) return@forEach
             state.rememberNpc(

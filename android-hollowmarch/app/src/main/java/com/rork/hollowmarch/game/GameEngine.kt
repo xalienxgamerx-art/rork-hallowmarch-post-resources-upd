@@ -7,6 +7,7 @@ import com.rork.hollowmarch.world.Rumor
 import com.rork.hollowmarch.world.Site
 import com.rork.hollowmarch.world.SiteKind
 import com.rork.hollowmarch.world.StructureKind
+import com.rork.hollowmarch.world.WORLD_LEAGUES
 import com.rork.hollowmarch.world.World
 import com.rork.hollowmarch.world.isSettlement
 import kotlin.math.abs
@@ -319,7 +320,7 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
         // A testing choice on the forge sheet lets a new delver wake behind any
         // door in the province; otherwise the vault receives them as always.
         val askedSite = creation?.startSiteId?.takeIf { startSlot == null }?.let { id ->
-            world.sites.firstOrNull { it.id == id }
+            world.siteOrNull(id)
         }
         val startSite = world.site(
             startSlot?.siteId?.takeIf { it >= 0 } ?: askedSite?.id ?: world.vaultSiteId
@@ -367,7 +368,7 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
         startSlot?.let { slot ->
             // Old saves kept their discoveries in their own field; the world keeps them now.
             slot.visited.split('\u001F').mapNotNull { it.toIntOrNull() }
-                .forEach { worldState.discover(it, day, minutes, world.sites.firstOrNull { s -> s.id == it }?.name ?: "") }
+                .forEach { worldState.discover(it, day, minutes, world.siteOrNull(it)?.name ?: "") }
             worldState.discover(startSite.id, day, minutes, startSite.name)
             camera.x = slot.x.coerceIn(1.2f, map.width - 1.2f)
             camera.y = slot.y.coerceIn(1.2f, map.height - 1.2f)
@@ -499,7 +500,7 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
         bindScene(map, currentSiteId, depth)
     }
 
-    fun siteName(): String = world.sites.firstOrNull { it.id == currentSiteId }?.name ?: world.site(world.vaultSiteId).name
+    fun siteName(): String = world.siteOrNull(currentSiteId)?.name ?: world.site(world.vaultSiteId).name
 
     /** The culture whose hands made this place's dead: the holder's people, or none. */
     private fun siteCultureId(siteId: Int): Int {
@@ -597,6 +598,9 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
 
     // ------------------------------------------------------------------ loop
 
+    /** The half-second clock that stamps the lesser places as you come near them. */
+    private var stampClock = 0f
+
     fun update(dt: Float) {
         if (dead) return
         val step = dt.coerceAtMost(0.05f)
@@ -660,6 +664,12 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
                     sighted += siteId
                     pushLog("You catch sight of ${world.site(siteId).name} — ${portal.label}.")
                 }
+            }
+            // the land fills in around you: lesser places are stamped as you come near
+            stampClock += step
+            if (stampClock >= 0.5f) {
+                stampClock = 0f
+                stampNearbyLandmarks()
             }
         }
         // The eye sinks when you crouch, and rises again when you stand.
@@ -1303,7 +1313,7 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
     /** Striking one of the folk costs the place's regard, and the watch turns out. */
     private fun angerTheSettlement(target: Entity) {
         if (!target.resident) return
-        world.sites.firstOrNull { it.id == currentSiteId }
+        world.siteOrNull(currentSiteId)
             ?.takeIf { it.isSettlement }
             ?.let { site ->
                 reputation.adjust(Layer.SETTLEMENT, site.id, -3, "Struck ${target.name}")
@@ -1316,7 +1326,7 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
         worldState.markDead(entity.persistId, minutes, "${entity.name} was slain")
         // A soul of a living place: the folk count drops, the watch is raised, the name is remembered.
         if (entity.resident) {
-            val site = world.sites.firstOrNull { it.id == currentSiteId } ?: return
+            val site = world.siteOrNull(currentSiteId) ?: return
             settlements.recordDeath(site.id)
             reputation.adjust(Layer.SETTLEMENT, site.id, -8, "Slew ${entity.name} in the street")
             alarmTheWatch(site)
@@ -1334,7 +1344,7 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
         if (entity.beastId >= 0) {
             worldState.slayBeast(entity.beastId, minutes, "${entity.name} was put down")
             val beast = world.beast(entity.beastId)
-            val lair = beast?.let { world.sites.firstOrNull { s -> s.id == it.lairSiteId } }
+            val lair = beast?.let { world.siteOrNull(it.lairSiteId) }
             val deed = "Slew ${entity.name}" +
                 (lair?.let { " in the wilds near ${it.name}" } ?: " in the open country")
             if (!deeds.contains(deed)) deeds += deed
@@ -1369,18 +1379,18 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
         }
         // A settlement remembers every soul struck down on its ground.
         if (entity.klass != null) {
-            world.sites.firstOrNull { it.id == currentSiteId }
+            world.siteOrNull(currentSiteId)
                 ?.takeIf { it.isSettlement }
                 ?.let { recordSettlementDeath(it) }
         }
         // A fallen rider is worth more than a fallen husk, to everyone but its lord.
         world.powers.firstOrNull { entity.name.startsWith("${it.name} ") }?.let { patron ->
             reputation.adjust(Layer.POWER, patron.id, -2, "Their riders fell on the road")
-            world.sites.firstOrNull { it.id == currentSiteId }?.let { site ->
+            world.siteOrNull(currentSiteId)?.let { site ->
                 reputation.adjust(Layer.SETTLEMENT, site.id, 2, "Riders of ${patron.name} put down")
             }
         }
-        val site = world.sites.firstOrNull { it.id == currentSiteId }
+        val site = world.siteOrNull(currentSiteId)
         val holder = site?.let { world.power(it.holderPowerId) }
         val underground = site?.kind in setOf(SiteKind.VAULT, SiteKind.RUIN, SiteKind.BARROW)
 
@@ -1440,11 +1450,11 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
 
     /** Word of a deed travels the roads at a walker's pace and lands day by day. */
     private fun spreadWord(deed: Deed, originSiteId: Int?) {
-        val origin = world.sites.firstOrNull { it.id == originSiteId } ?: return
+        val origin = originSiteId?.let { world.siteOrNull(it) } ?: return
         world.sites
             .filter { it.isSettlement && !it.ruined && it.id != origin.id }
             .forEach { site ->
-                val leagues = MapFactory.distance(origin.x, origin.y, site.x, site.y) * 42f
+                val leagues = MapFactory.distance(origin.x, origin.y, site.x, site.y) * WORLD_LEAGUES
                 val days = (leagues / 2.1f / 24f).roundToInt().coerceIn(1, 8)
                 pendingWord += Word(day + days, site.id, deed)
             }
@@ -1533,6 +1543,7 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
             "You set out for ${site.name} — ${bearing.compass}, " +
                 "${(bearing.leagues * 10).roundToInt() / 10f} leagues."
         )
+        ensureLandmark(site)
         // 1-3: the road's hours are the world's hours.
         advanceWorld(hours * 60f)
         val road = lastReport
@@ -1606,7 +1617,7 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
 
     /** The living folk of a settlement, as the years have made them. */
     fun folkOf(siteId: Int): Int =
-        world.sites.firstOrNull { it.id == siteId }?.let { settlements.folkOf(it) } ?: 0
+        world.siteOrNull(siteId)?.let { settlements.folkOf(it) } ?: 0
 
     /** The stage a settlement stands at, from its founding rank and its living folk. */
     fun stageAt(site: Site): SettlementStage = settlements.stageAt(site)
@@ -1644,14 +1655,14 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
     /** True when you stand at a living temple with brass enough for an offering. */
     fun canOffer(): Boolean {
         if (brass < 10) return false
-        val site = world.sites.firstOrNull { it.id == currentSiteId } ?: return false
+        val site = world.siteOrNull(currentSiteId) ?: return false
         return site.structures.any { it.kind == StructureKind.TEMPLE && !it.ruined }
     }
 
     /** Silver at the altar: the god takes note, the house remembers, the town softens. */
     fun offerAtTemple() {
         if (!canOffer()) return
-        val site = world.sites.first { it.id == currentSiteId }
+        val site = world.site(currentSiteId)
         brass -= 10
         val holder = world.power(site.holderPowerId)
         val deity = world.deities.firstOrNull { it.cultureId == holder?.cultureId }
@@ -1680,14 +1691,14 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
     /** True when you stand at a living shrine with a coin to spare. */
     fun canOfferAtShrine(): Boolean {
         if (brass < 5) return false
-        val site = world.sites.firstOrNull { it.id == currentSiteId } ?: return false
+        val site = world.siteOrNull(currentSiteId) ?: return false
         return site.kind == SiteKind.SHRINE
     }
 
     /** A coin in the bowl at a wayside shrine: the god's ear, and the locals' quiet approval. */
     fun offerAtShrine() {
         if (!canOfferAtShrine()) return
-        val site = world.sites.first { it.id == currentSiteId }
+        val site = world.site(currentSiteId)
         brass -= 5
         val cultureId = SiteGen.cultureId(world, site)
         val deity = world.deities.firstOrNull { it.cultureId == cultureId }
@@ -2657,7 +2668,7 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
         }
         camera.angle = map.spawnAngle
         if (goingUnder) {
-            world.sites.firstOrNull { it.id == currentSiteId }?.let { recordDelving(it) }
+            world.siteOrNull(currentSiteId)?.let { recordDelving(it) }
             val skin = SiteGen.skinFor(SiteGen.cultureId(world, site))
             pushLog(
                 if (!portal.down) "You climb the stair up. ${skin.darkLine}"
@@ -2676,7 +2687,7 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
     /** Through the door: an interior of exactly the footprint its walls keep. */
     private fun enterBuilding(portal: Portal) {
         val siteId = portal.targetSiteId.takeIf { it >= 0 } ?: currentSiteId
-        val site = world.sites.firstOrNull { it.id == siteId } ?: return
+        val site = world.siteOrNull(siteId) ?: return
         val yard = surfaceMap ?: map.takeIf { it.buildings.isNotEmpty() }
         val index = portal.targetFloor - SiteGen.BUILDING_FLOOR_BASE
         val building = yard?.buildings?.getOrNull(index) ?: return
@@ -2770,6 +2781,51 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
         }
     }
 
+    /**
+     * Stamp the pending lesser places whose ground you have come near: the
+     * continent fills in around the walker, a handful of landmarks at a time.
+     */
+    private fun stampNearbyLandmarks() {
+        if (!onOverland) return
+        val bcx = camera.x.toInt() / 10
+        val bcy = camera.y.toInt() / 10
+        var stamped = 0
+        for (gx in bcx - 1..bcx + 1) {
+            for (gy in bcy - 1..bcy + 1) {
+                val bucket =
+                    overland.pendingLandmarks[OverlandGen.pendingKey(gx * 10, gy * 10)] ?: continue
+                val iter = bucket.iterator()
+                while (iter.hasNext()) {
+                    val site = iter.next()
+                    val d = MapFactory.distance(
+                        site.x * (overland.width - 1), site.y * (overland.height - 1),
+                        camera.x, camera.y
+                    )
+                    if (d > 14f) continue
+                    iter.remove()
+                    OverlandGen.stampLandmark(overland, site)
+                    worldState.discover(site.id, day, minutes, site.name)
+                    pushLog("You come upon ${site.name} — a ${site.kind.label}.")
+                    if (++stamped >= 8) return
+                }
+            }
+        }
+    }
+
+    /** A place's landmark, drawn if it has waited in the pending rolls. */
+    private fun ensureLandmark(site: Site) {
+        if (site.id in overland.stampedSites) return
+        overland.pendingLandmarks[
+            OverlandGen.pendingKey(OverlandGen.landmarkX(site), OverlandGen.landmarkY(site))
+        ]?.removeAll { it.id == site.id }
+        OverlandGen.stampLandmark(overland, site)
+    }
+
+    /** A place's landmark on the open ground, revealed as arrival demands it. */
+    fun revealLandmark(siteId: Int) {
+        world.siteOrNull(siteId)?.let { ensureLandmark(it) }
+    }
+
     /** Out of a place and into the open country again, beside the way you came. */
     private fun leaveToOverland() {
         val site = world.site(currentSiteId)
@@ -2779,6 +2835,7 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
         surfaceMap = null
         inBuilding = null
         map = overland
+        ensureLandmark(site)
         val spot = overland.entrySpots[site.id]
         camera.x = spot?.first ?: map.spawnX
         camera.y = spot?.second ?: map.spawnY
@@ -2788,14 +2845,15 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
 
     // ------------------------------------------------------------------ bearings
 
-    /** Pins: rumor-named places and every living settlement, plus where you have stood. */
+    /** Pins: rumor-named places and the nearest living steads, plus where you have stood. */
     fun bearings(): List<Bearing> {
         val rumorPins = rumors.mapNotNull { rumor ->
             rumor.siteId.takeIf { it >= 0 }
         }.toSet()
-        val knownPins = world.sites.filter { it.isSettlement && !it.ruined }.map { it.id }.toSet()
         val pins = mutableListOf<Bearing>()
         val stood = mutableListOf<Bearing>()
+        val known = mutableListOf<Pair<Site, Float>>()
+        val wx = overland.width - 1
         world.sites.forEach { site ->
             when {
                 site.id in visitedSites -> stood += bearingTo(site).copy(
@@ -2803,8 +2861,16 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
                     source = worldState.visitedDay(site.id)?.let { walkedAgoLabel(day - it) } ?: "walked"
                 )
                 site.id in rumorPins -> pins += bearingTo(site).copy(source = "rumor")
-                site.id in knownPins -> pins += bearingTo(site).copy(source = "the roads")
+                site.isSettlement && !site.ruined -> known += site to MapFactory.distance(
+                    site.x * wx, site.y * wx, camera.x, camera.y
+                )
             }
+        }
+        // The roads remember what is near: the closest steads stand first, and a
+        // continent's worth never floods the page at once.
+        known.sortBy { it.second }
+        known.take(60).forEach { (site, _) ->
+            pins += bearingTo(site).copy(source = "the roads")
         }
         return pins.sortedBy { it.leagues } + stood.sortedBy { it.leagues }
     }
@@ -2821,7 +2887,7 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
             val flows = history.economy.tradeFlowsOf(site, settlements, world.sites)
             if (flows.isEmpty()) "" else
                 "roads: " + flows.take(2).joinToString(" · ") { flow ->
-                    val partner = world.sites.firstOrNull { it.id == flow.partnerId }?.name ?: "afar"
+                    val partner = world.siteOrNull(flow.partnerId)?.name ?: "afar"
                     val cargo = cargoWord(flow.cargo)
                     if (flow.incoming) "$cargo from $partner" else "$cargo to $partner"
                 }
@@ -2880,6 +2946,7 @@ class GameEngine(val world: World, startSlot: SaveSlot?, creation: DelverCreatio
                 } ?: world.site(world.vaultSiteId)
             currentSiteId = nearest.id
             worldState.discover(nearest.id, day, minutes, nearest.name)
+            ensureLandmark(nearest)
             camera.x = overland.entrySpots[nearest.id]?.first ?: overland.spawnX
             camera.y = overland.entrySpots[nearest.id]?.second ?: overland.spawnY
             camera.angle = -1.5708f

@@ -236,6 +236,13 @@ data class Rumor(
 
 enum class Biome { OCEAN, MARSH, MOOR, DOWNS, FOREST, HILLS, PEAK }
 
+/**
+ * The province's edge-to-edge measure in leagues: Daggerfall's recorded land,
+ * about 62,000 square miles (161,600 km²), is a square of roughly 84 leagues
+ * to a side. Every bearing, journey and hour of travel is measured against it.
+ */
+const val WORLD_LEAGUES = 84f
+
 data class RiverPoint(val x: Float, val y: Float)
 
 data class River(val name: String, val points: List<RiverPoint>)
@@ -306,12 +313,17 @@ data class World(
 ) {
     val currentAge: Age get() = ages.last()
 
+    /** Every place by its id, indexed once: the province is far too large to scan. */
+    val siteById: Map<Int, Site> by lazy { sites.associateBy { it.id } }
+
     val livingBeasts: List<Beast> get() = beasts.filter { it.alive }
     val lostArtifacts: List<Artifact> get() = artifacts.filter { it.keeperSiteId == null }
 
     fun power(id: Int?): Power? = powers.firstOrNull { it.id == id }
 
-    fun site(id: Int): Site = sites.first { it.id == id }
+    fun site(id: Int): Site = siteById.getValue(id)
+
+    fun siteOrNull(id: Int): Site? = siteById[id]
 
     fun culture(id: Int): Culture = cultures.first { it.id == id }
 

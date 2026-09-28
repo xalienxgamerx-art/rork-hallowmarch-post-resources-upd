@@ -32,6 +32,20 @@ object Textures {
     const val FLOOR_SCREE = 7
     const val FLOOR_FORD = 8
 
+    // The realm tints: a kingdom's open ground wears its own hue of green, so
+    // the marches between realms read plainly on the land.
+    const val FLOOR_REALM_0 = 9
+    const val FLOOR_REALM_1 = 10
+    const val FLOOR_REALM_2 = 11
+    const val FLOOR_REALM_3 = 12
+    const val FLOOR_REALM_4 = 13
+    const val FLOOR_REALM_5 = 14
+
+    val REALM_FLOORS = intArrayOf(
+        FLOOR_REALM_0, FLOOR_REALM_1, FLOOR_REALM_2,
+        FLOOR_REALM_3, FLOOR_REALM_4, FLOOR_REALM_5
+    )
+
     /** wallTextures[id] — index 0 unused so tile ids map straight through. */
     lateinit var walls: Array<IntArray>
         private set
@@ -57,7 +71,7 @@ object Textures {
                 else -> stone(rng, 0x6A5F4E, 0x2A2620)
             }
         }
-        floors = Array(9) { id ->
+        floors = Array(15) { id ->
             when (id) {
                 FLOOR_FLAG -> flagstone(rng)
                 FLOOR_GRASS -> ground(rng, 0x3B4430, 0x2A331F)
@@ -67,6 +81,12 @@ object Textures {
                 FLOOR_PINE -> ground(rng, 0x3A3D28, 0x242A1A)
                 FLOOR_SCREE -> scree(rng)
                 FLOOR_FORD -> ford(rng)
+                FLOOR_REALM_0 -> ground(rng, 0x41422C, 0x2D311E)
+                FLOOR_REALM_1 -> ground(rng, 0x39482F, 0x273620)
+                FLOOR_REALM_2 -> ground(rng, 0x464A33, 0x323520)
+                FLOOR_REALM_3 -> ground(rng, 0x3E4638, 0x2B3326)
+                FLOOR_REALM_4 -> ground(rng, 0x414B2A, 0x2D3419)
+                FLOOR_REALM_5 -> ground(rng, 0x374334, 0x262F24)
                 else -> ground(rng, 0x1C1A16, 0x131210)
             }
         }

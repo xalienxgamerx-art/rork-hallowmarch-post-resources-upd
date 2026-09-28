@@ -164,7 +164,7 @@ object WorldSimulation {
             }
         }
         if (moved > 0 && playerSiteId >= 0) {
-            world.sites.firstOrNull { it.id == playerSiteId }?.takeIf { it.isSettlement }?.let {
+            world.siteOrNull(playerSiteId)?.takeIf { it.isSettlement }?.let {
                 notes += "The folk of ${it.name} have gone about their day without you."
             }
         }
