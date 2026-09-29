@@ -237,11 +237,11 @@ data class Rumor(
 enum class Biome { OCEAN, MARSH, MOOR, DOWNS, FOREST, HILLS, PEAK }
 
 /**
- * The province's edge-to-edge measure in leagues: Daggerfall's recorded land,
- * about 62,000 square miles (161,600 km²), is a square of roughly 84 leagues
- * to a side. Every bearing, journey and hour of travel is measured against it.
+ * The province's edge-to-edge measure in leagues: half of Daggerfall's recorded
+ * land — about 15,500 square miles (40,200 km²) — is a square of 42 leagues to
+ * a side. Every bearing, journey and hour of travel is measured against it.
  */
-const val WORLD_LEAGUES = 84f
+const val WORLD_LEAGUES = 42f
 
 data class RiverPoint(val x: Float, val y: Float)
 

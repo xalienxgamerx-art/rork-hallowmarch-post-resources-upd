@@ -852,8 +852,10 @@ class EconomySimulation private constructor(private val world: World) {
             }
         }
         if (folk >= TOWN_FOLK) {
-            // the forge: ore smelted into metal
-            for ((material, qty) in st.oreStock.entries.toList()) {
+            // the forge: ore smelted into metal — walked in key order, so a save
+            // and a running world smelt the same ores the same way, and the
+            // industries they found keep one chronology
+            for ((material, qty) in st.oreStock.entries.sortedBy { it.key.name }) {
                 val smelt = minOf(qty, folk / SMELT_FOLK_PER_LOAD)
                 if (smelt > 0) {
                     st.oreStock[material] = qty - smelt
@@ -963,8 +965,10 @@ class EconomySimulation private constructor(private val world: World) {
             }
         }
 
-        // a road is kept while its other end stands within reach and alive
-        val dead = st.routes.keys.filter { key ->
+        // a road is kept while its other end stands within reach and alive —
+        // swept in key order, so the chronicle remembers closures the same way
+        // a reloaded world does
+        val dead = st.routes.keys.sorted().filter { key ->
             val route = parseRoute(key) ?: return@filter false
             val otherId = if (route.fromId == site.id) route.toId else route.fromId
             val other = living.firstOrNull { it.id == otherId }
@@ -1331,8 +1335,10 @@ class EconomySimulation private constructor(private val world: World) {
             return MaterialProvenance(material, MaterialSource.LOCAL)
         }
         val byId = sites.associateBy { it.id }
-        // one road's reach: a partner's own hands, not a partner's imports
-        for (key in st.routes.keys) {
+        // one road's reach: a partner's own hands, not a partner's imports.
+        // Walked in key order, so a save and a running world name the same source
+        // even when two roads carry the same cargo.
+        for (key in st.routes.keys.sorted()) {
             val route = parseRoute(key) ?: continue
             if (route.cargo != material.name) continue
             val otherId = if (route.fromId == site.id) route.toId else route.fromId
@@ -1389,8 +1395,12 @@ class EconomySimulation private constructor(private val world: World) {
             "=${st.stoneSeam}:${st.saltSeam}:${st.clayBed}:${st.clayInit}" +
             "=${st.oreStock.entries.sortedBy { it.key.name }.joinToString(",") { "${it.key.name}:${it.value}" }}" +
             "=${st.materialStock.entries.sortedBy { it.key.name }.joinToString(",") { "${it.key.name}:${it.value}" }}" +
-            "=${st.industries.sortedBy { it.name }.joinToString(",")}" +
-            "=${st.declined.sortedBy { it.name }.joinToString(",")}" +
+            // industries keeps its founding chronology: the decline check walks
+            // this order, so a reloaded world must fail its works the same way
+            "=${st.industries.joinToString(",")}" +
+            // declined keeps its own chronology: the census names the first work
+            // to fail, so the save must remember the order the failures came in
+            "=${st.declined.joinToString(",")}" +
             "=${st.production.entries.sortedBy { it.key.name }.joinToString(",") { "${it.key.name}:${it.value}" }}" +
             "=${st.foodProduction.entries.joinToString(",") { "${it.key.name}:${it.value}" }}" +
             "=${st.timberCut}" +

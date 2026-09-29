@@ -11,7 +11,8 @@ import org.junit.Test
 /**
  * The province's scale, born not budgeted: whatever the centuries produce.
  * These tests pin the contract without pinning a number — determinism holds,
- * seeds and histories differ, and the land measures what Daggerfall recorded.
+ * seeds and histories differ, and the land measures half of what Daggerfall
+ * recorded, sized so a phone forges it in seconds without freezing.
  */
 class WorldGenScaleTest {
 
@@ -28,11 +29,11 @@ class WorldGenScaleTest {
     private fun livingRealms(world: World): Int = world.powers.count { !it.extinct }
 
     @Test
-    fun landMeasuresDaggerfallsRecordedSize() {
-        // The walked map spans the world's own measure: 84 leagues corner to corner.
+    fun landMeasuresHalfOfDaggerfall() {
+        // The walked map spans the world's own measure: 42 leagues corner to corner.
         val leagues = OverlandGen.LEAGUES_PER_CELL * (OverlandGen.SIZE - 1)
         assertEquals(WORLD_LEAGUES, leagues, 0.01f)
-        assertEquals("about 62,000 square miles is 84 leagues a side", 84f, WORLD_LEAGUES, 0f)
+        assertEquals("half of Daggerfall's recorded land is 42 leagues a side", 42f, WORLD_LEAGUES, 0f)
     }
 
     @Test
@@ -44,7 +45,7 @@ class WorldGenScaleTest {
         val leagues = MapFactory.distance(far.x, far.y, near.x, near.y) * WORLD_LEAGUES
         assertTrue(
             "crossing the province is a true expedition, measured $leagues leagues",
-            leagues > 40f
+            leagues > 15f
         )
     }
 
@@ -95,8 +96,8 @@ class WorldGenScaleTest {
                 "long=${long777.sites.size}"
         )
         assertTrue(
-            "centuries on a continent cannot hold fewer than a thousand places, had ${world.sites.size}",
-            world.sites.size >= 1000
+            "centuries on half a continent cannot hold fewer than eight hundred places, had ${world.sites.size}",
+            world.sites.size >= 800
         )
         assertTrue(
             "souls are counted, not set: had ${soulsOf(world)}",
@@ -104,7 +105,7 @@ class WorldGenScaleTest {
         )
         assertTrue(
             "many realms may hold court at once: had ${livingRealms(world)}",
-            livingRealms(world) >= 8
+            livingRealms(world) >= 4
         )
         assertTrue(
             "great places live fully in the simulation",

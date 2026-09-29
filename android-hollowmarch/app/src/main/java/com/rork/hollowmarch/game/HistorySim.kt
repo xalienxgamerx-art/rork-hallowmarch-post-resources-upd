@@ -133,6 +133,16 @@ class HistoricalSimulation private constructor(
     private val events = mutableListOf<AgeEvent>()
     private var lastYear: Int = 0
 
+    /**
+     * The log's room: at least one remembered deed for every living place, so a
+     * crowded province's census timelines keep their annals — never fewer than
+     * the old fixed cap, never a size the world's own population doesn't set.
+     */
+    private val eventLogCap = maxOf(
+        EVENT_LOG_CAP,
+        world.sites.count { it.isSettlement && !it.ruined }
+    )
+
     /** What the world remembers of itself, newest last. */
     fun eventLog(): List<AgeEvent> = events
 
@@ -164,7 +174,7 @@ class HistoricalSimulation private constructor(
         }
         lastYear = year
         events += produced
-        while (events.size > EVENT_LOG_CAP) events.removeAt(0)
+        while (events.size > eventLogCap) events.removeAt(0)
         return produced
     }
 

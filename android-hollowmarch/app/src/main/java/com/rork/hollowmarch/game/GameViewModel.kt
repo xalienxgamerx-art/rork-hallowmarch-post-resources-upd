@@ -2,15 +2,18 @@ package com.rork.hollowmarch.game
 
 import android.util.Log
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import com.rork.hollowmarch.world.ChronicleEvent
 import com.rork.hollowmarch.world.Rumor
 import com.rork.hollowmarch.world.Site
 import com.rork.hollowmarch.world.World
 import com.rork.hollowmarch.world.WorldGenerator
 import com.rork.hollowmarch.world.isSettlement
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlin.random.Random
 
 data class TitleState(
@@ -28,7 +31,9 @@ data class TitleState(
     val relics: Int = 0,
     val beasts: Int = 0,
     val generationLog: List<String> = emptyList(),
-    val continueLabel: String? = null
+    val continueLabel: String? = null,
+    /** True while the forge burns in the background; the title waits for it. */
+    val isForging: Boolean = false
 )
 
 /** What you ask the forge for: a seed, and how much history to burn into it. */
@@ -49,12 +54,18 @@ data class WorldSettings(
 /** Owns the province, the expedition inside it, and the snapshot the HUD reads. */
 class GameViewModel : ViewModel() {
 
-    private var _world: World = WorldGenerator.generate(SaveStore.load()?.seed ?: freshSeed())
-    val world: World get() = _world
+    // The forge runs off the main hand: these are written from a background
+    // dispatcher once the centuries have burned, so they must be volatile.
+    @Volatile
+    private var _world: World? = null
+    val world: World get() = requireNotNull(_world) { "The province is still being forged" }
 
     /** The province's own roster of classes, named by its seed. */
-    var classRoster: ClassRoster = ClassRoster(_world)
-        private set
+    @Volatile
+    private var _classRoster: ClassRoster? = null
+    var classRoster: ClassRoster
+        get() = requireNotNull(_classRoster) { "The province is still being forged" }
+        private set(value) { _classRoster = value }
 
     private var _engine: GameEngine? = null
     val engine: GameEngine? get() = _engine
@@ -62,35 +73,57 @@ class GameViewModel : ViewModel() {
     private val _hud = MutableStateFlow(HudState())
     val hud: StateFlow<HudState> = _hud.asStateFlow()
 
-    private val _title = MutableStateFlow(buildTitleState())
+    private val _title = MutableStateFlow(TitleState(isForging = true))
     val title: StateFlow<TitleState> = _title.asStateFlow()
 
     private var publishTimer = 0f
 
     private fun freshSeed(): Long = Random.nextLong(1_000_000L, 9_999_999L)
 
+    init {
+        forge { WorldGenerator.generate(SaveStore.load()?.seed ?: freshSeed()) }
+    }
+
+    /**
+     * The forge burns in the background: the world arrives when the centuries
+     * have finished, and the title plate reports it. Generating on the main
+     * hand froze the app the moment the province grew past a continent's worth
+     * of places — so it never does again, whatever size the world reaches.
+     */
+    private fun forge(generate: () -> World) {
+        _title.value = _title.value.copy(isForging = true, continueLabel = null)
+        viewModelScope.launch(Dispatchers.Default) {
+            val world = generate()
+            _world = world
+            _classRoster = ClassRoster(world)
+            _engine = null
+            _title.value = buildTitleState()
+        }
+    }
+
     private fun buildTitleState(): TitleState {
+        val w = _world ?: return TitleState(isForging = true)
         val slot = SaveStore.load()
-        val continueLabel = slot?.takeIf { it.seed == _world.seed }?.let {
-            "Continue — ${it.siteName.ifBlank { _world.site(_world.vaultSiteId).name }}, Day ${it.day}"
+        val continueLabel = slot?.takeIf { it.seed == w.seed }?.let {
+            "Continue — ${it.siteName.ifBlank { w.site(w.vaultSiteId).name }}, Day ${it.day}"
         }
         return TitleState(
-            seedCode = _world.seedCode,
-            province = _world.provinceName,
-            ageLabel = "${_world.currentAge.name}, Year ${_world.currentYear}",
-            yearsSimulated = _world.currentYear,
-            peoples = _world.cultures.size,
-            powers = _world.powers.count { !it.extinct },
-            places = _world.sites.size,
-            souls = _world.sites
+            seedCode = w.seedCode,
+            province = w.provinceName,
+            ageLabel = "${w.currentAge.name}, Year ${w.currentYear}",
+            yearsSimulated = w.currentYear,
+            peoples = w.cultures.size,
+            powers = w.powers.count { !it.extinct },
+            places = w.sites.size,
+            souls = w.sites
                 .filter { it.isSettlement && !it.ruined }
                 .sumOf { it.population },
-            ruins = _world.ruinCount,
-            figures = _world.figures.size,
-            wars = _world.warCount(),
-            relics = _world.artifacts.size,
-            beasts = _world.beasts.size,
-            generationLog = _world.highlightEvents(3).map { "Yr ${it.year} — ${it.text}" },
+            ruins = w.ruinCount,
+            figures = w.figures.size,
+            wars = w.warCount(),
+            relics = w.artifacts.size,
+            beasts = w.beasts.size,
+            generationLog = w.highlightEvents(3).map { "Yr ${it.year} — ${it.text}" },
             continueLabel = continueLabel
         )
     }
@@ -98,24 +131,27 @@ class GameViewModel : ViewModel() {
     /** Forge a brand-new province from [settings] and roll a delver into its sealed vault. */
     fun forgeNewWorld(settings: WorldSettings = WorldSettings()) {
         SaveStore.clear()
-        _world = WorldGenerator.generate(
-            seed = settings.resolvedSeed(),
-            historyYears = settings.historyYears,
-            maxEvents = settings.maxEvents,
-            cultureCount = settings.peoples
-        )
-        classRoster = ClassRoster(_world)
-        _engine = null
-        _title.value = buildTitleState()
+        val seed = settings.resolvedSeed()
+        val historyYears = settings.historyYears
+        val maxEvents = settings.maxEvents
+        val peoples = settings.peoples
+        forge {
+            WorldGenerator.generate(
+                seed = seed,
+                historyYears = historyYears,
+                maxEvents = maxEvents,
+                cultureCount = peoples
+            )
+        }
     }
 
     /** Every door in the province a new delver may wake behind (a testing choice). */
-    val spawnSites: List<Site> get() = _world.sites
+    val spawnSites: List<Site> get() = _world?.sites ?: emptyList()
 
     fun startExpedition(resume: Boolean, creation: DelverCreation? = null) {
-        val slot = if (resume) SaveStore.load()?.takeIf { it.seed == _world.seed } else null
+        val slot = if (resume) SaveStore.load()?.takeIf { it.seed == world.seed } else null
         if (!resume) SaveStore.clear()
-        _engine = GameEngine(_world, slot, creation)
+        _engine = GameEngine(world, slot, creation)
         _engine?.let { logMapState("engine ready") }
         publish(force = true)
     }
@@ -292,7 +328,7 @@ class GameViewModel : ViewModel() {
     }
 
     /** The province's chronicle, its magical history folded in, oldest first. */
-    fun chronicle(): List<ChronicleEvent> = _engine?.fullChronicle() ?: _world.events
+    fun chronicle(): List<ChronicleEvent> = _engine?.fullChronicle() ?: _world?.events ?: emptyList()
 
     fun dropItem(item: Item) {
         _engine?.dropItem(item)
@@ -333,7 +369,7 @@ class GameViewModel : ViewModel() {
         persist()
     }
 
-    fun rumors(): List<Rumor> = _engine?.rumors ?: _world.rumors
+    fun rumors(): List<Rumor> = _engine?.rumors ?: _world?.rumors ?: emptyList()
 
     fun deeds(): List<String> = _engine?.deeds ?: emptyList()
 

@@ -675,7 +675,12 @@ class EconomyTest {
         economy.applyEncoded(crafted)
         assertTrue(economy.routesOf(a).isNotEmpty())
         val events = runYears(economy, 1, 100)
-        assertTrue("the road is gone", economy.routesOf(a).isEmpty())
+        // In a crowded land the place may beat new roads to living neighbors the
+        // same year — the contract is that the road to the dead place is gone.
+        assertTrue(
+            "the road is gone",
+            economy.routesOf(a).none { it.toId == dead.id || it.fromId == dead.id }
+        )
         assertTrue(
             "the chronicle remembers the road that fell",
             events.any {
